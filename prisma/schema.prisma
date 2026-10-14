@@ -1,0 +1,188 @@
+// CareerPilot database (PostgreSQL). Same tables the Spring backend created (Flyway V1–V9), so existing data stays.
+// Not expressible here, but created by prisma/migrations/0_init (keep them when writing new migrations):
+//   - partial unique index jobs (user_id, external_id) where external_id is not null
+//   - partial unique index email_templates (user_id) where is_default (one default template per user)
+//   - check constraints on users.email (lower-case), jobs.status and jobs.work_mode
+// Status-like columns are plain strings (validated in code), matching the existing varchar columns.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // Neon: the pooled connection string (add &pgbouncer=true)
+  url       = env("DATABASE_URL")
+  // Neon: the direct (non-pooled) connection string, used by prisma migrate. Locally the same as DATABASE_URL.
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id             String    @id @default(uuid()) @db.Uuid
+  clerkUserId    String    @unique(map: "users_clerk_user_id_key") @map("clerk_user_id") @db.VarChar(64)
+  email          String?   @db.VarChar(320)
+  displayName    String?   @map("display_name") @db.VarChar(100)
+  avatarUrl      String?   @map("avatar_url") @db.VarChar(2048)
+  lastSignedInAt DateTime? @map("last_signed_in_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  jobs           Job[]
+  emailTemplates EmailTemplate[]
+  sentEmails     SentEmail[]
+  resumes        Resume[]
+  resumeVersions ResumeVersion[]
+  driveSettings  DriveSettings?
+  driveDocuments DriveDocument[]
+
+  @@index([email], map: "users_email_idx")
+  @@map("users")
+}
+
+model Job {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  title       String    @db.VarChar(200)
+  company     String    @db.VarChar(200)
+  location    String?   @db.VarChar(200)
+  /// ONSITE, HYBRID or REMOTE
+  workMode    String?   @map("work_mode") @db.VarChar(16)
+  jobUrl      String?   @map("job_url") @db.VarChar(2048)
+  description String?
+  notes       String?
+  /// SAVED, TO_REVIEW, PREPARING, APPLIED, INTERVIEW, OFFER, REJECTED or CLOSED
+  status      String    @db.VarChar(20)
+  /// MANUAL, or the job board (GREENHOUSE / LEVER / ASHBY …) when saved from Find jobs
+  source      String    @db.VarChar(32)
+  /// The Find-jobs posting id, so the same posting can't be saved twice
+  externalId  String?   @map("external_id") @db.VarChar(200)
+  archived    Boolean   @default(false)
+  appliedAt   DateTime? @map("applied_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentEmails SentEmail[]
+
+  @@map("jobs")
+}
+
+model EmailTemplate {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String   @db.VarChar(100)
+  subject   String   @db.VarChar(255)
+  body      String
+  isDefault Boolean  @default(false) @map("is_default")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentEmails SentEmail[]
+
+  @@index([userId, updatedAt(sort: Desc)], map: "email_templates_user_idx")
+  @@map("email_templates")
+}
+
+/// Application emails Gmail accepted (the body is not stored)
+model SentEmail {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  jobId          String?  @map("job_id") @db.Uuid
+  templateId     String?  @map("template_id") @db.Uuid
+  recipient      String   @db.VarChar(320)
+  subject        String   @db.VarChar(255)
+  gmailMessageId String   @map("gmail_message_id") @db.VarChar(128)
+  gmailThreadId  String?  @map("gmail_thread_id") @db.VarChar(128)
+  sentAt         DateTime @map("sent_at") @db.Timestamptz(6)
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job      Job?           @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  template EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  @@index([userId, jobId, sentAt(sort: Desc)], map: "sent_emails_user_job_idx")
+  @@map("sent_emails")
+}
+
+/// Form content (data) and, optionally, a docEngine document that is what gets rendered
+model Resume {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  title      String   @db.VarChar(120)
+  templateId String   @map("template_id") @db.VarChar(40)
+  pageSize   String   @map("page_size") @db.VarChar(10)
+  data       Json
+  document   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions       ResumeVersion[]
+  driveDocuments DriveDocument[]
+
+  @@index([userId, updatedAt(sort: Desc)], map: "resumes_user_updated_idx")
+  @@map("resumes")
+}
+
+/// Resume history and proposals (used when RESUME_VERSIONS_ENABLED=true)
+model ResumeVersion {
+  id         String   @id @default(uuid()) @db.Uuid
+  resumeId   String   @map("resume_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  number     Int
+  label      String?  @db.VarChar(120)
+  /// EDITOR, IMPORT, AI or RESTORE
+  source     String   @db.VarChar(20)
+  /// SAVED, PROPOSED or ACCEPTED
+  status     String   @db.VarChar(20)
+  templateId String   @map("template_id") @db.VarChar(40)
+  pageSize   String   @map("page_size") @db.VarChar(10)
+  data       Json
+  document   Json?
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  resume Resume @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([resumeId, number], map: "resume_versions_number_key")
+  @@index([resumeId, number(sort: Desc)], map: "resume_versions_resume_idx")
+  @@map("resume_versions")
+}
+
+/// Per-user Google Drive preferences (no credentials: Google tokens stay with Clerk)
+model DriveSettings {
+  userId      String   @id @map("user_id") @db.Uuid
+  enabled     Boolean  @default(true)
+  googleEmail String?  @map("google_email") @db.VarChar(320)
+  folderId    String?  @map("folder_id") @db.VarChar(128)
+  folderName  String?  @map("folder_name") @db.VarChar(255)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("drive_settings")
+}
+
+/// Files CareerPilot created in the user's Drive (deleting a row never deletes the Drive file)
+model DriveDocument {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  driveFileId String   @map("drive_file_id") @db.VarChar(128)
+  name        String   @db.VarChar(255)
+  folderId    String?  @map("folder_id") @db.VarChar(128)
+  mimeType    String   @map("mime_type") @db.VarChar(100)
+  sizeBytes   BigInt?  @map("size_bytes")
+  webViewLink String?  @map("web_view_link") @db.VarChar(2048)
+  requestId   String?  @map("request_id") @db.Uuid
+  resumeId    String?  @map("resume_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resume Resume? @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, driveFileId], map: "drive_documents_user_file_key")
+  @@unique([userId, requestId], map: "drive_documents_user_request_key")
+  @@index([userId, updatedAt(sort: Desc)], map: "drive_documents_user_updated_idx")
+  @@map("drive_documents")
+}

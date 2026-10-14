@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://careerpilot.app/schemas/resume-v2.json",
+  "title": "CareerPilot resume (schema version 2)",
+  "description": "A resume is basics plus an ordered list of sections. Sections appear in the PDF in array order. Keep existing ids when editing so changes can be reviewed; give new sections and items new ids (or leave id out and one is generated). Text fields marked 'formatted' allow **bold**, *italic* and [label](https://example.com) only. Never invent experience, employers, dates or qualifications that the person did not provide.",
+  "type": "object",
+  "required": ["basics"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "layout": {
+      "type": ["object", "null"],
+      "description": "Optional page margins in millimetres. Leave out to use the template's defaults (15 top, 16 elsewhere).",
+      "additionalProperties": false,
+      "properties": {
+        "marginTop": { "type": ["number", "null"], "minimum": 5, "maximum": 40 },
+        "marginRight": { "type": ["number", "null"], "minimum": 5, "maximum": 40 },
+        "marginBottom": { "type": ["number", "null"], "minimum": 5, "maximum": 40 },
+        "marginLeft": { "type": ["number", "null"], "minimum": 5, "maximum": 40 }
+      }
+    },
+    "basics": {
+      "type": "object",
+      "required": ["fullName"],
+      "additionalProperties": false,
+      "properties": {
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "headline": { "type": ["string", "null"], "maxLength": 150, "description": "e.g. Backend Engineer · Java & Spring" },
+        "email": { "type": ["string", "null"], "format": "email", "maxLength": 254 },
+        "phone": { "type": ["string", "null"], "maxLength": 40 },
+        "location": { "type": ["string", "null"], "maxLength": 100 },
+        "links": {
+          "type": "array",
+          "maxItems": 6,
+          "items": {
+            "type": "object",
+            "required": ["url"],
+            "additionalProperties": false,
+            "properties": {
+              "label": { "type": ["string", "null"], "maxLength": 40 },
+              "url": { "$ref": "#/$defs/webLink" }
+            }
+          }
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "maxItems": 25,
+      "items": { "$ref": "#/$defs/section" }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$" },
+    "webLink": {
+      "type": "string",
+      "maxLength": 500,
+      "description": "http(s) address; a missing scheme is treated as https. No other schemes, no user:password@."
+    },
+    "formatted": {
+      "type": "string",
+      "description": "Plain text plus **bold**, *italic* and [label](https://…). No HTML."
+    },
+    "visible": { "type": ["boolean", "null"], "description": "false hides it from the PDF without deleting it. Default true." },
+    "section": {
+      "type": "object",
+      "required": ["type", "title"],
+      "additionalProperties": false,
+      "description": "Only the field matching 'type' is used: entries, content, items or groups.",
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "type": { "enum": ["entries", "text", "list", "skills"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 60, "description": "Any heading, e.g. Experience, Research, Volunteering." },
+        "visible": { "$ref": "#/$defs/visible" },
+        "entries": {
+          "type": "array",
+          "maxItems": 40,
+          "description": "type=entries: jobs, degrees, projects, certifications…",
+          "items": {
+            "type": "object",
+            "required": ["title"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 150, "description": "Job title, degree, project or certificate name" },
+              "subtitle": { "type": ["string", "null"], "maxLength": 150, "description": "Company, school, issuer or technologies" },
+              "location": { "type": ["string", "null"], "maxLength": 100 },
+              "startDate": { "type": ["string", "null"], "maxLength": 30, "description": "Free text, e.g. Jan 2022" },
+              "endDate": { "type": ["string", "null"], "maxLength": 30 },
+              "current": { "type": "boolean", "description": "true prints 'Present' as the end date" },
+              "url": { "anyOf": [{ "$ref": "#/$defs/webLink" }, { "type": "null" }] },
+              "description": { "allOf": [{ "$ref": "#/$defs/formatted" }], "maxLength": 1500 },
+              "bullets": {
+                "type": "array",
+                "maxItems": 20,
+                "items": { "allOf": [{ "$ref": "#/$defs/formatted" }], "minLength": 1, "maxLength": 500 }
+              },
+              "visible": { "$ref": "#/$defs/visible" }
+            }
+          }
+        },
+        "content": {
+          "allOf": [{ "$ref": "#/$defs/formatted" }],
+          "maxLength": 4000,
+          "description": "type=text: paragraphs separated by a blank line (e.g. a summary)."
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 50,
+          "description": "type=list: bullet points (awards, publications, interests…)",
+          "items": {
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "text": { "allOf": [{ "$ref": "#/$defs/formatted" }], "minLength": 1, "maxLength": 500 },
+              "visible": { "$ref": "#/$defs/visible" }
+            }
+          }
+        },
+        "groups": {
+          "type": "array",
+          "maxItems": 30,
+          "description": "type=skills: named groups of keywords, e.g. Languages: Java, Go",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "name": { "type": ["string", "null"], "maxLength": 60 },
+              "keywords": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 60 } },
+              "visible": { "$ref": "#/$defs/visible" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "classic",
+  "name": "Classic",
+  "description": "Serif type, centered header and ruled sections. A safe choice for any role.",
+  "styles": {
+    "body": { "font-family": "Source Serif 4" },
+    "a": { "text-decoration": "underline" },
+    ".header": { "text-align": "center" },
+    ".name": { "font-size": "21pt", "font-weight": "700" },
+    ".headline": { "margin-top": "2pt", "font-size": "11pt", "font-style": "italic", "font-weight": "400" },
+    ".contact": { "margin-top": "5pt", "font-size": "9.5pt" },
+    ".contact-link": { "text-decoration": "none" },
+    ".sep": { "color": "#8c8f97" },
+    ".section": { "margin-top": "11pt" },
+    ".section-title": { "padding-bottom": "2pt", "border-bottom": "0.75pt solid #1f2328", "font-size": "11pt", "font-weight": "700", "text-transform": "uppercase", "page-break-after": "avoid", "-fs-page-break-min-height": "2.6cm" },
+    ".summary": { "margin-top": "4pt" },
+    ".entry": { "margin-top": "7pt", "page-break-inside": "avoid" },
+    ".entry-head": { "display": "table", "width": "100%", "page-break-after": "avoid" },
+    ".entry-main": { "display": "table-cell", "vertical-align": "top" },
+    ".entry-dates": { "display": "table-cell", "vertical-align": "top", "width": "1%", "padding-left": "10pt", "white-space": "nowrap", "text-align": "right", "font-size": "9.5pt" },
+    ".entry-title": { "font-size": "10.5pt", "font-weight": "700" },
+    ".entry-link": { "text-decoration": "none", "font-weight": "400" },
+    ".entry-subtitle": { "font-style": "italic" },
+    ".entry-description": { "margin-top": "2pt" },
+    ".entry-highlights": { "margin-top": "3pt" },
+    ".list-items": { "margin-top": "5pt" },
+    ".skill": { "margin-top": "2pt" },
+    ".skill-name": { "font-weight": "600" },
+    ".first": { "margin-top": "6pt" }
+  }
+}

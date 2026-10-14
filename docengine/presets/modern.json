@@ -1,0 +1,30 @@
+{
+  "id": "modern",
+  "name": "Modern",
+  "description": "Clean sans-serif with a blue accent. Works well for tech roles.",
+  "styles": {
+    "body": { "font-family": "Inter", "font-size": "9.5pt" },
+    "a": { "text-decoration": "underline" },
+    ".name": { "font-size": "22pt", "font-weight": "700", "color": "#1868db" },
+    ".headline": { "margin-top": "1pt", "font-size": "11pt", "font-weight": "600", "color": "#44474f" },
+    ".contact": { "margin-top": "5pt", "font-size": "9pt", "color": "#44474f" },
+    ".contact-link": { "text-decoration": "none", "color": "#1868db" },
+    ".sep": { "color": "#8c8f97" },
+    ".section": { "margin-top": "12pt" },
+    ".section-title": { "font-size": "10pt", "font-weight": "700", "text-transform": "uppercase", "color": "#1868db", "page-break-after": "avoid", "-fs-page-break-min-height": "2.6cm" },
+    ".summary": { "margin-top": "4pt" },
+    ".entry": { "margin-top": "7pt", "page-break-inside": "avoid" },
+    ".entry-head": { "display": "table", "width": "100%", "page-break-after": "avoid" },
+    ".entry-main": { "display": "table-cell", "vertical-align": "top" },
+    ".entry-dates": { "display": "table-cell", "vertical-align": "top", "width": "1%", "padding-left": "10pt", "white-space": "nowrap", "text-align": "right", "font-size": "9pt", "color": "#44474f" },
+    ".entry-title": { "font-size": "10.5pt", "font-weight": "600" },
+    ".entry-link": { "text-decoration": "none", "font-weight": "400", "color": "#1868db" },
+    ".entry-subtitle": { "color": "#44474f" },
+    ".entry-description": { "margin-top": "2pt" },
+    ".entry-highlights": { "margin-top": "3pt" },
+    ".list-items": { "margin-top": "5pt" },
+    ".skill": { "margin-top": "2pt" },
+    ".skill-name": { "font-weight": "600" },
+    ".first": { "margin-top": "5pt" }
+  }
+}
