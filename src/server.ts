@@ -1,4 +1,4 @@
-import { createApp } from "./app.js";
+import { createApp } from "./create-app.js";
 import { clerkTokenVerifier } from "./auth/clerk.js";
 import { describeConfig, loadConfig } from "./config.js";
 import { createDb } from "./db/prisma.js";

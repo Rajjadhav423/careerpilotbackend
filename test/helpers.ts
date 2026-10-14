@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { createApp, type AppDependencies } from "../src/app.js";
+import { createApp, type AppDependencies } from "../src/create-app.js";
 import type { TokenVerifier } from "../src/auth/clerk.js";
 import type { Config } from "../src/config.js";
 import { createDb, type Db } from "../src/db/prisma.js";

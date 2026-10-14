@@ -70,6 +70,15 @@ npm start        # run the compiled build
 
 Check that it's up: `GET http://localhost:8080/api/v1/health`
 
+## Deploying to Vercel
+
+Vercel runs `src/app.ts` as a serverless function (`vercel.json` adds the `docengine/` fonts and presets to it).
+
+1. Set the environment variables from `.env.example` in the Vercel project (Neon: pooled `DATABASE_URL` with
+   `&pgbouncer=true`, direct `DIRECT_URL`).
+2. Run migrations from your machine against the production database: `npm run migrate`.
+3. Point the Clerk webhook to `https://<your-app>.vercel.app/api/v1/webhooks/clerk`.
+
 ## Tests
 
 ```bash
@@ -86,8 +95,9 @@ Type-check with `npm run typecheck`.
 
 ```
 src/
-  app.ts            routes and middleware
-  server.ts         entry point
+  create-app.ts     routes and middleware
+  server.ts         entry point for local and long-running hosts (listens on PORT)
+  app.ts            entry point for serverless hosts like Vercel (default-exports the app)
   config.ts         environment settings
   auth/             Clerk tokens and webhook
   users/  jobs/  templates/  applications/  gmail/
