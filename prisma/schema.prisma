@@ -34,6 +34,7 @@ model User {
   resumeVersions ResumeVersion[]
   driveSettings  DriveSettings?
   driveDocuments DriveDocument[]
+  fields         UserField[]
 
   @@index([email], map: "users_email_idx")
   @@map("users")
@@ -185,4 +186,22 @@ model DriveDocument {
   @@unique([userId, requestId], map: "drive_documents_user_request_key")
   @@index([userId, updatedAt(sort: Desc)], map: "drive_documents_user_updated_idx")
   @@map("drive_documents")
+}
+
+/// Reusable details used in resumes and documents as {{key}} (resolved when a PDF or preview is made)
+model UserField {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  key       String   @db.VarChar(40)
+  label     String   @db.VarChar(60)
+  value     String   @db.VarChar(500)
+  position  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key], map: "user_fields_user_key_key")
+  @@index([userId, position], map: "user_fields_user_idx")
+  @@map("user_fields")
 }

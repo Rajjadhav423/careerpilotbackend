@@ -140,10 +140,10 @@ describe("docEngine API", () => {
     expect(res.text).toContain("&lt;img src=x onerror=alert(1)&gt;");
   });
 
-  it("returns page images", async () => {
+  it("returns the PDF for the in-browser page preview", async () => {
     const res = await request(app().app).post("/api/v1/docs/render/pages").set(auth())
       .send({ document: doc([{ tag: "p", text: "Hi" }]) });
-    expect(res.body).toEqual({ pageCount: 1, pages: [Buffer.from("png-page-1").toString("base64")] });
+    expect(res.body).toEqual({ pageCount: 1, pdf: Buffer.from("%PDF-1.7\n% fake\n").toString("base64") });
   });
 
   it("explains bad requests", async () => {

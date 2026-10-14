@@ -8,6 +8,12 @@
 
 export const MAX_URL_LENGTH = 500;
 
+/**
+ * A saved detail written in place of a link, e.g. "{{github}}". It's resolved to the user's value before a preview or
+ * PDF is made (see users/fields.ts), so documents and resumes may keep it as written.
+ */
+export const FIELD_PLACEHOLDER = /^\{\{\s*[a-z][a-z0-9_]{0,39}\s*\}\}$/;
+
 const WEB_SCHEMES = new Set(["http:", "https:"]);
 
 /**
@@ -46,6 +52,7 @@ const TEL = /^tel:(\+?[0-9(][0-9 ().-]{2,28}[0-9])$/i;
 export function documentLink(value: string | null | undefined): string | null {
   if (value == null) return null;
   const trimmed = value.trim();
+  if (FIELD_PLACEHOLDER.test(trimmed)) return trimmed;
   if (trimmed.slice(0, 7).toLowerCase() === "mailto:") {
     return trimmed.length <= MAX_URL_LENGTH && MAILTO.test(trimmed) ? `mailto:${trimmed.slice(7)}` : null;
   }
@@ -58,7 +65,7 @@ export function documentLink(value: string | null | undefined): string | null {
 
 /** True for a value we can turn into a safe link. Blank counts as valid (optional). */
 export const isAcceptableWebLink = (value: string | null | undefined) =>
-  value == null || value.trim() === "" || webLink(value) !== null;
+  value == null || value.trim() === "" || webLink(value) !== null || FIELD_PLACEHOLDER.test(value.trim());
 
 function looksLikeScheme(value: string) {
   // "javascript:alert(1)", "mailto:x", "data:…": keep the scheme so the check rejects it; "host:8080/x" is a port

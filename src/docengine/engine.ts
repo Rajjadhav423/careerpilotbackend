@@ -27,8 +27,7 @@ export class DocEngine {
   }
 
   /**
-   * Renders one small document in the background after startup, so the browser is started and fonts are loaded
-   * before the first real request.
+   * Renders one small document in the background after startup, so fonts are loaded before the first real request.
    */
   warmUp() {
     const start = Date.now();
@@ -36,9 +35,9 @@ export class DocEngine {
       schemaVersion: 3, document: "resume", preset: "classic",
       sections: [{ id: "s", nodes: [{ tag: "h1", text: "Warm-up" }, { tag: "p", html: "<b>Bold</b> <i>italic</i> text" }] }],
     }, "STRICT");
-    this.toPageImages(doc)
+    this.toPdf(doc)
       .then(() => console.info(`docEngine ready in ${Date.now() - start} ms`))
-      .catch((error: Error) => console.warn(`docEngine warm-up failed: ${error.name}`));
+      .catch((error: Error) => console.warn(`docEngine warm-up failed: ${error.message}`));
   }
 
   /** Validates without throwing. */
@@ -59,17 +58,13 @@ export class DocEngine {
 
   /** Throws 422 DOCUMENT_TOO_LONG when the PDF has more pages than page.maxPages. */
   async toPdf(doc: Doc): Promise<RenderedPdf> {
-    const rendered = await this.pdf.convert(this.toXhtml(doc));
+    const rendered = await this.pdf.render(doc, this.presetStore.find(doc.preset)?.styles ?? {});
     const max = doc.page.maxPages;
     if (rendered.pages > max) {
       throw new ApiError(422, "DOCUMENT_TOO_LONG", `The document is ${rendered.pages} pages but maxPages is ${max}. `
         + "Shorten some sections or reduce font sizes and spacing.", { pages: rendered.pages, maxPages: max });
     }
     return rendered;
-  }
-
-  async toPageImages(doc: Doc): Promise<Buffer[]> {
-    return this.pdf.pageImages((await this.toPdf(doc)).bytes);
   }
 
   toJson(doc: Doc): JsonObject {

@@ -17,9 +17,11 @@ import type { DriveClient } from "./drive/google-drive.js";
 import { GmailService, gmailRouter, type GmailSender } from "./gmail/gmail.js";
 import type { GoogleAccounts } from "./gmail/google-accounts.js";
 import { errorHandler, notFoundHandler } from "./http/errors.js";
+import { requestLogger } from "./http/request-logger.js";
 import { JobService, jobsRouter } from "./jobs/jobs.js";
 import { ResumeDocuments, ResumeService, resumesRouter } from "./resumes/resumes.js";
 import { TemplateService, templatesRouter } from "./templates/templates.js";
+import { UserFieldService, userFieldsRouter } from "./users/fields.js";
 import { toMeResponse, UserService } from "./users/users.js";
 
 /*
@@ -59,11 +61,14 @@ export function createApp(deps: AppDependencies): App {
   const drive = new DriveService(db, deps.googleAccounts, deps.driveClient);
   const resumeDocuments = new ResumeDocuments(engine);
   const resumes = new ResumeService(db, resumeDocuments, config.resumeVersionsEnabled);
+  const userFields = new UserFieldService(db);
 
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
   app.set("json spaces", 0);
+
+  app.use(requestLogger);
 
   // CORS for calls from the frontend's origin. The Clerk token travels in the Authorization header; no cookies.
   app.use("/api", cors({
@@ -91,13 +96,14 @@ export function createApp(deps: AppDependencies): App {
   api.get("/me", (_req, res) => {
     res.json(toMeResponse(currentUser(res)));
   });
+  api.use("/me/fields", userFieldsRouter(userFields));
   api.use("/jobs/:jobId/emails", applicationEmailsRouter(applicationEmails));
   api.use("/jobs", jobsRouter(jobs));
   api.use("/email-templates", templatesRouter(templates));
   api.use("/gmail", gmailRouter(gmail));
   api.use("/discover", discoveryRouter(discovery));
-  api.use("/docs", docsRouter(engine));
-  api.use("/resumes", resumesRouter(resumes, resumeDocuments, drive));
+  api.use("/docs", docsRouter(engine, userFields));
+  api.use("/resumes", resumesRouter(resumes, resumeDocuments, drive, userFields));
   api.use("/drive", driveRouter(drive));
 
   app.use("/api/v1", api);

@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 import { clerkTokenVerifier } from "./auth/clerk.js";
 import { describeConfig, loadConfig } from "./config.js";
 import { createDb } from "./db/prisma.js";
-import { ChromiumPdfRenderer } from "./docengine/pdf.js";
+import { ReactPdfRenderer } from "./docengine/pdf.js";
 import { GoogleDriveClient } from "./drive/google-drive.js";
 import { GmailApiClient } from "./gmail/gmail.js";
 import { ClerkGoogleAccounts } from "./gmail/google-accounts.js";
@@ -10,12 +10,11 @@ import { ClerkGoogleAccounts } from "./gmail/google-accounts.js";
 /* Starts the API: loads settings, connects to PostgreSQL, then listens on PORT. Migrations: npm run migrate. */
 
 const config = loadConfig();
-console.info("Starting CareerPilot API", describeConfig(config));
 
 const db = createDb(config.databaseUrl);
 await db.$connect();
 
-const pdf = new ChromiumPdfRenderer(config.pdf);
+const pdf = new ReactPdfRenderer(config.pdf);
 const { app, engine } = createApp({
   config,
   db,

@@ -8,15 +8,17 @@ import { z } from "zod";
 import { currentUser } from "../auth/clerk.js";
 import { asJson, jsonOrNull, type Db, type Tx } from "../db/prisma.js";
 import type { DocEngine } from "../docengine/engine.js";
-import { attachment } from "../docengine/engine.js";
+import { attachment, invalidDocument } from "../docengine/engine.js";
 import { RESOURCES_DIR } from "../docengine/fonts.js";
 import type { PageSize } from "../docengine/model.js";
 import type { RenderedPdf } from "../docengine/pdf.js";
 import type { Preset } from "../docengine/presets.js";
 import type { DriveService } from "../drive/drive.js";
+import { fillFields, type UserFieldService } from "../users/fields.js";
 import { ApiError, fieldErrors, validationError } from "../http/errors.js";
 import { body, uuidParam } from "../http/validate.js";
 import { docDiff, resumeDiff, type Change } from "./diff.js";
+import { docToResume } from "./doc-to-resume.js";
 import { normalize, readResumeJson, resumeDataSchema, type ResumeData } from "./resume-data.js";
 import { resumeToDoc } from "./resume-to-doc.js";
 
@@ -48,6 +50,11 @@ const pageSize = z.enum(["A4", "LETTER"], { message: "must be A4 or LETTER" }).n
 const templateId = z.string().max(40, "size must be between 0 and 40").nullish();
 const data = resumeDataSchema.nullish().refine((value) => value != null, "is required");
 const documentJson = z.unknown().optional();
+/**
+ * The resume's document when the request carries edited form data: the form is converted and merged into it, so the
+ * document's styles, page settings and section styles survive form edits.
+ */
+const baseDocument = z.unknown().optional();
 const uuid = z.string({ required_error: "is required" }).uuid("must be a valid id");
 
 /** Create or replace a saved resume. `document` (optional) is a docEngine document that, when present, is rendered. */
@@ -58,6 +65,7 @@ export const resumeRequestSchema = z.object({
   pageSize,
   data,
   document: documentJson,
+  baseDocument,
 });
 
 /** Render resume data that may not be saved yet (preview, download, save to Drive). */
@@ -65,6 +73,7 @@ export const renderRequestSchema = z.object({
   templateId,
   pageSize,
   data,
+  baseDocument,
   fileName: z.string().max(150, "size must be between 0 and 150").nullish(),
 });
 
@@ -84,6 +93,7 @@ export const saveToDriveSchema = z.object({
   pageSize,
   data,
   document: documentJson,
+  baseDocument,
   fileName: z.string().max(150, "size must be between 0 and 150").nullish(),
   folderId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, "is not a folder id").nullish(),
   resumeId: z.string().uuid("must be a valid id").nullish(),
@@ -139,22 +149,34 @@ export class ResumeDocuments {
     return preset;
   }
 
-  /** The resume as document JSON (schema version 3). */
-  toDocument(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown) {
-    return resumeToDoc(this.template(templateId).id, size ?? null, data);
+  /**
+   * The resume as document JSON (schema version 3). With a base document, the form's content is merged into it: the
+   * base keeps its styles, page settings (except paper size and form margins) and the style of each section.
+   */
+  toDocument(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown, base?: unknown): JsonDoc {
+    const generated = resumeToDoc(this.template(templateId).id, size ?? null, data);
+    if (base === undefined || base === null) return generated;
+    const read = this.engine.read(base, "LENIENT").doc;
+    return read ? mergeDocument(generated, this.engine.toJson(read)) : generated;
   }
 
-  renderHtml(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown): string {
-    return this.engine.toXhtml(this.doc(templateId, size, data));
+  /** A document read back into the form's format, with its preset and paper size. */
+  toForm(document: unknown) {
+    const result = this.engine.read(document, "LENIENT");
+    if (!result.doc) throw invalidDocument(result.errors);
+    const preset = result.doc.preset && this.engine.presets().some((p) => p.id === result.doc!.preset)
+      ? result.doc.preset : DEFAULT_TEMPLATE;
+    return { templateId: preset, pageSize: result.doc.page.size, data: docToResume(result.doc) };
   }
 
-  renderPdf(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown): Promise<RenderedPdf> {
-    return this.engine.toPdf(this.doc(templateId, size, data));
+  renderHtml(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown, base?: unknown): string {
+    return this.engine.toXhtml(this.doc(templateId, size, data, base));
   }
 
-  renderPageImages(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown): Promise<Buffer[]> {
-    return this.engine.toPageImages(this.doc(templateId, size, data));
+  renderPdf(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown, base?: unknown): Promise<RenderedPdf> {
+    return this.engine.toPdf(this.doc(templateId, size, data, base));
   }
+
 
   /** A docEngine document checked with the strict rules and written back normalized (what gets stored). */
   normalizeDocument(document: unknown): Record<string, unknown> {
@@ -165,9 +187,26 @@ export class ResumeDocuments {
     return this.engine.toPdf(this.engine.require(document, "STRICT"));
   }
 
-  private doc(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown) {
-    return this.engine.require(this.toDocument(templateId, size, data), "STRICT");
+  private doc(templateId: string | null | undefined, size: PageSize | null | undefined, data: unknown, base?: unknown) {
+    return this.engine.require(this.toDocument(templateId, size, data, base), "STRICT");
   }
+}
+
+/** The form's document with the base document's styling kept (see ResumeDocuments.toDocument). */
+export function mergeDocument(generated: JsonDoc, base: JsonDoc): JsonDoc {
+  const page = generated.page as JsonDoc;
+  const basePage = (base.page ?? {}) as JsonDoc;
+  const baseSections = new Map(((base.sections ?? []) as JsonDoc[]).map((section) => [section.id, section]));
+  return {
+    ...generated,
+    ...(base.styles ? { styles: base.styles } : {}),
+    meta: { ...(generated.meta as JsonDoc), language: (base.meta as JsonDoc | undefined)?.language ?? "en" },
+    page: { ...basePage, size: page.size, ...(page.margin ? { margin: page.margin } : {}) },
+    sections: (generated.sections as JsonDoc[]).map((section) => {
+      const style = baseSections.get(section.id)?.style;
+      return style ? { ...section, style } : section;
+    }),
+  };
 }
 
 const resumeNotFound = () => new ApiError(404, "RESUME_NOT_FOUND", "Resume not found.");
@@ -205,7 +244,7 @@ export class ResumeService {
 
   async create(userId: string, request: ResumeRequest): Promise<ResumeResponse> {
     const template = this.documents.template(request.templateId).id;
-    const document = this.document(request.document);
+    const document = this.document(this.requestDocument(request));
     return this.db.$transaction(async (tx) => {
       if (await tx.resume.count({ where: { userId } }) >= MAX_RESUMES_PER_USER) {
         throw new ApiError(409, "RESUME_LIMIT_REACHED",
@@ -222,7 +261,7 @@ export class ResumeService {
 
   async update(userId: string, id: string, request: ResumeRequest): Promise<ResumeResponse> {
     const template = this.documents.template(request.templateId).id;
-    const document = this.document(request.document);
+    const document = this.document(this.requestDocument(request));
     return this.db.$transaction(async (tx) => {
       await this.find(tx, userId, id);
       const resume = await tx.resume.update({ where: { id }, data: {
@@ -356,6 +395,13 @@ export class ResumeService {
     if (old.length > 0) await tx.resumeVersion.deleteMany({ where: { id: { in: old.map((v) => v.id) } } });
   }
 
+  /** The document to store: the one sent, or the form merged into the base document (form edits). */
+  private requestDocument(request: ResumeRequest): unknown {
+    if (request.document !== undefined && request.document !== null) return request.document;
+    if (request.baseDocument === undefined || request.baseDocument === null) return null;
+    return this.documents.toDocument(request.templateId, request.pageSize, request.data, request.baseDocument);
+  }
+
   /** A request's document, validated and normalized for storage; null when there is none. */
   private document(document: unknown): JsonDoc | null {
     return document === undefined || document === null ? null : this.documents.normalizeDocument(document);
@@ -410,8 +456,13 @@ function versionResponse(v: VersionRow) {
   };
 }
 
-export function resumesRouter(resumes: ResumeService, documents: ResumeDocuments, drive: DriveService): Router {
+export function resumesRouter(resumes: ResumeService, documents: ResumeDocuments, drive: DriveService,
+  fields: UserFieldService): Router {
   const router = Router();
+  /** The request with the user's saved details ({{github}} …) filled in, for printing. */
+  async function withFields<T>(res: Parameters<typeof currentUser>[0], request: T): Promise<T> {
+    return fillFields(fields, currentUser(res).id, request);
+  }
   const schema = readFileSync(path.join(RESOURCES_DIR, "schema", "resume.schema.json"));
   const resumeId = (req: Parameters<typeof uuidParam>[0]) => uuidParam(req, "id", resumeNotFound());
   const versionId = (req: Parameters<typeof uuidParam>[0]) => uuidParam(req, "versionId", versionNotFound());
@@ -445,27 +496,26 @@ export function resumesRouter(resumes: ResumeService, documents: ResumeDocuments
     res.status(201).location(`/api/v1/resumes/${created.id}`).json(created);
   });
 
-  /** The PDF's pages as PNG images (base64), so the preview matches the PDF exactly, page by page. */
+  /** The PDF as base64 with its page count, for the editor's page preview (drawn in the browser with pdf.js). */
   router.post("/render/pages", async (req, res) => {
-    const request = body(req, renderRequestSchema);
-    const pages = (await documents.renderPageImages(request.templateId, request.pageSize, request.data))
-      .map((png) => png.toString("base64"));
-    res.set("Cache-Control", "no-store").json({ pageCount: pages.length, pages });
+    const request = await withFields(res, body(req, renderRequestSchema));
+    const pdf = await documents.renderPdf(request.templateId, request.pageSize, request.data, request.baseDocument);
+    res.set("Cache-Control", "no-store").json({ pageCount: pdf.pages, pdf: pdf.bytes.toString("base64") });
   });
 
   /** The document as HTML, for the editor's live preview (shown in a sandboxed frame). */
-  router.post("/render/preview", (req, res) => {
-    const request = body(req, renderRequestSchema);
+  router.post("/render/preview", async (req, res) => {
+    const request = await withFields(res, body(req, renderRequestSchema));
     res.type("text/html; charset=utf-8")
       .set("Content-Security-Policy", PREVIEW_CSP)
       .set("Cache-Control", "no-store")
-      .send(documents.renderHtml(request.templateId, request.pageSize, request.data));
+      .send(documents.renderHtml(request.templateId, request.pageSize, request.data, request.baseDocument));
   });
 
   /** The PDF as a download. */
   router.post("/render/pdf", async (req, res) => {
-    const request = body(req, renderRequestSchema);
-    const pdf = await documents.renderPdf(request.templateId, request.pageSize, request.data);
+    const request = await withFields(res, body(req, renderRequestSchema));
+    const pdf = await documents.renderPdf(request.templateId, request.pageSize, request.data, request.baseDocument);
     res.status(200)
       .type("application/pdf")
       .set("Content-Disposition", attachment(resumeFileName(request.fileName, request.data)))
@@ -477,12 +527,12 @@ export function resumesRouter(resumes: ResumeService, documents: ResumeDocuments
   /** Generates the PDF and saves it to the user's Google Drive. Retrying with the same requestId is safe. */
   router.post("/render/drive", async (req, res) => {
     const user = currentUser(res);
-    const request = body(req, saveToDriveSchema);
+    const request = await withFields(res, body(req, saveToDriveSchema));
     if (request.resumeId && !(await resumes.isOwnedBy(user.id, request.resumeId))) throw resumeNotFound();
     // A docEngine document, when sent, is what gets printed; otherwise the form data
     const pdf = request.document !== undefined && request.document !== null
       ? await documents.renderDocumentPdf(request.document)
-      : await documents.renderPdf(request.templateId, request.pageSize, request.data);
+      : await documents.renderPdf(request.templateId, request.pageSize, request.data, request.baseDocument);
     const saved = await drive.uploadPdf(user, request.requestId, resumeFileName(request.fileName, request.data),
       request.folderId, request.resumeId, pdf.bytes);
     res.status(201).json(saved);
@@ -491,7 +541,16 @@ export function resumesRouter(resumes: ResumeService, documents: ResumeDocuments
   /** The form data as a docEngine document (schema version 3), to continue editing as a document. */
   router.post("/document", (req, res) => {
     const request = body(req, renderRequestSchema);
-    res.json(documents.toDocument(request.templateId, request.pageSize, request.data));
+    res.json(documents.toDocument(request.templateId, request.pageSize, request.data, request.baseDocument));
+  });
+
+  /** A document read back into the form (content only; the styling stays in the document). */
+  router.post("/form", (req, res) => {
+    const document = (req.body as { document?: unknown } | undefined)?.document;
+    if (typeof document !== "object" || document === null || Array.isArray(document)) {
+      throw new ApiError(400, "DOCUMENT_MISSING", "Send { \"document\": { … } }.");
+    }
+    res.json(documents.toForm(document));
   });
 
   router.get("/:id", async (req, res) => {

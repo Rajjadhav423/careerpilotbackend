@@ -1,4 +1,4 @@
-import { webLink } from "../docengine/safe-urls.js";
+import { FIELD_PLACEHOLDER, webLink } from "../docengine/safe-urls.js";
 
 /*
  * The tiny formatting language allowed inside resume text: **bold**, *italic* (or _italic_) and [label](https://…).
@@ -46,7 +46,8 @@ export function richTextToXhtml(text: string | null | undefined): string {
       const end = close < 0 ? -1 : closingParen(text, close + 2);
       if (close > i + 1 && end > close + 2) {
         const label = text.slice(i + 1, close);
-        const safe = webLink(text.slice(close + 2, end));
+        const target = text.slice(close + 2, end);
+        const safe = webLink(target) ?? (FIELD_PLACEHOLDER.test(target.trim()) ? target.trim() : null);
         out += safe ? `<a href="${escape(safe)}">${escape(label)}</a>` : escape(label);
         i = end + 1;
         continue;

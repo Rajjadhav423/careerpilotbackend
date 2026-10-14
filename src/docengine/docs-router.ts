@@ -1,6 +1,8 @@
 import { Router, type Request } from "express";
 
+import { currentUser } from "../auth/clerk.js";
 import { ApiError } from "../http/errors.js";
+import { fillFields, type UserFieldService } from "../users/fields.js";
 import { attachment, pdfFileName, type DocEngine } from "./engine.js";
 import type { ReadMode } from "./reader.js";
 
@@ -36,8 +38,11 @@ export function modeOf(body: Body): ReadMode {
   throw new ApiError(400, "MODE_INVALID", "mode must be \"strict\" or \"lenient\".");
 }
 
-export function docsRouter(engine: DocEngine): Router {
+export function docsRouter(engine: DocEngine, fields: UserFieldService): Router {
   const router = Router();
+  /** The document with the user's saved details ({{github}} …) filled in, for printing. */
+  const printable = async (res: Parameters<typeof currentUser>[0], document: unknown) =>
+    fillFields(fields, currentUser(res).id, document);
 
   router.get("/rules", (_req, res) => {
     res.type("text/markdown; charset=utf-8").send(engine.rules);
@@ -57,7 +62,9 @@ export function docsRouter(engine: DocEngine): Router {
     let pages: number | null = null;
     if (result.doc) {
       try {
-        pages = (await engine.toPdf(result.doc)).pages;
+        // Counted on the printed version: saved details ({{github}} …) filled in
+        const printed = engine.read(await printable(res, documentOf(body)), mode).doc ?? result.doc;
+        pages = (await engine.toPdf(printed)).pages;
       } catch (error) {
         if (!(error instanceof ApiError)) throw error;
         // Too long or too large: report it like a rule error
@@ -72,7 +79,7 @@ export function docsRouter(engine: DocEngine): Router {
 
   router.post("/render/pdf", async (req, res) => {
     const body = requestBody(req);
-    const doc = engine.require(documentOf(body), modeOf(body));
+    const doc = engine.require(await printable(res, documentOf(body)), modeOf(body));
     const pdf = await engine.toPdf(doc);
     const fileName = typeof body.fileName === "string" ? body.fileName : null;
     res.status(200)
@@ -83,17 +90,16 @@ export function docsRouter(engine: DocEngine): Router {
       .send(pdf.bytes);
   });
 
-  /** The PDF's pages as base64 PNG images (an exact preview). */
+  /** The PDF as base64 with its page count, for the editor's page preview (drawn in the browser with pdf.js). */
   router.post("/render/pages", async (req, res) => {
     const body = requestBody(req);
-    const doc = engine.require(documentOf(body), modeOf(body));
-    const pages = (await engine.toPageImages(doc)).map((png) => png.toString("base64"));
-    res.set("Cache-Control", "no-store").json({ pageCount: pages.length, pages });
+    const pdf = await engine.toPdf(engine.require(await printable(res, documentOf(body)), modeOf(body)));
+    res.set("Cache-Control", "no-store").json({ pageCount: pdf.pages, pdf: pdf.bytes.toString("base64") });
   });
 
-  router.post("/render/html", (req, res) => {
+  router.post("/render/html", async (req, res) => {
     const body = requestBody(req);
-    const doc = engine.require(documentOf(body), modeOf(body));
+    const doc = engine.require(await printable(res, documentOf(body)), modeOf(body));
     res.type("text/html; charset=utf-8")
       .set("Content-Security-Policy", HTML_CSP)
       .set("Cache-Control", "no-store")

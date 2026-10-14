@@ -26,7 +26,6 @@ const schema = z.object({
     .string()
     .optional()
     .transform((value) => value === "true"),
-  PUPPETEER_EXECUTABLE_PATH: z.string().optional(),
   PDF_MAX_PAGES: z.coerce.number().int().positive().default(10),
   PDF_MAX_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
   PDF_RENDER_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
@@ -50,7 +49,6 @@ export type Config = {
   maxRequestBytes: number;
   resumeVersionsEnabled: boolean;
   pdf: {
-    executablePath: string | null;
     maxPages: number;
     maxBytes: number;
     renderTimeoutMs: number;
@@ -83,7 +81,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxRequestBytes: e.MAX_REQUEST_BYTES,
     resumeVersionsEnabled: e.RESUME_VERSIONS_ENABLED,
     pdf: {
-      executablePath: blank(e.PUPPETEER_EXECUTABLE_PATH),
       maxPages: e.PDF_MAX_PAGES,
       maxBytes: e.PDF_MAX_BYTES,
       renderTimeoutMs: e.PDF_RENDER_TIMEOUT_MS,

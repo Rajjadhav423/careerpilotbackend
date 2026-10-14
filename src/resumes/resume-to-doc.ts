@@ -1,4 +1,4 @@
-import { webLink } from "../docengine/safe-urls.js";
+import { FIELD_PLACEHOLDER, webLink } from "../docengine/safe-urls.js";
 import type { PageSize } from "../docengine/model.js";
 import { layoutBottom, layoutLeft, layoutRight, layoutTop, normalize, type ResumeData, type Section } from "./resume-data.js";
 import { richTextParagraphs, richTextToXhtml } from "./rich-text.js";
@@ -16,6 +16,8 @@ export type Contact = { text: string; href: string | null };
 
 /** Link text without the scheme ("github.com/raj"), which reads better and survives ATS link stripping. */
 export function contactLink(url: string | null): Contact | null {
+  // A saved detail ({{github}}): kept as written, resolved when the PDF is made
+  if (url && FIELD_PLACEHOLDER.test(url.trim())) return { text: url.trim(), href: url.trim() };
   const safe = webLink(url);
   if (!safe) return null;
   let text = safe.replace(/^https?:\/\/(www\.)?/, "");

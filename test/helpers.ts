@@ -5,6 +5,7 @@ import { createApp, type AppDependencies } from "../src/app.js";
 import type { TokenVerifier } from "../src/auth/clerk.js";
 import type { Config } from "../src/config.js";
 import { createDb, type Db } from "../src/db/prisma.js";
+import type { Doc } from "../src/docengine/model.js";
 import type { PdfRenderer, RenderedPdf } from "../src/docengine/pdf.js";
 import { DriveApiError, type DriveClient, type DriveFile } from "../src/drive/google-drive.js";
 import type { GmailSender, SentMessage } from "../src/gmail/gmail.js";
@@ -31,7 +32,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     corsOrigins: ["http://localhost:3000"],
     maxRequestBytes: 512 * 1024,
     resumeVersionsEnabled: false,
-    pdf: { executablePath: null, maxPages: 10, maxBytes: 5 * 1024 * 1024, renderTimeoutMs: 20_000, maxConcurrent: 2, maxQueued: 8 },
+    pdf: { maxPages: 10, maxBytes: 5 * 1024 * 1024, renderTimeoutMs: 20_000, maxConcurrent: 2, maxQueued: 8 },
     discoveryBoards: ["greenhouse:acme:Acme"],
     ...overrides,
   };
@@ -138,18 +139,14 @@ export class FakeDrive implements DriveClient {
   }
 }
 
-/** Pretends to print: one page per 4 sections, and the XHTML is kept for assertions. */
+/** Pretends to print: one page per 4 visible sections; the last document is kept for assertions. */
 export class FakePdf implements PdfRenderer {
-  lastXhtml = "";
+  lastDoc: Doc | null = null;
 
-  async convert(xhtml: string): Promise<RenderedPdf> {
-    this.lastXhtml = xhtml;
-    const sections = (xhtml.match(/<section /g) ?? []).length;
+  async render(doc: Doc): Promise<RenderedPdf> {
+    this.lastDoc = doc;
+    const sections = doc.sections.filter((s) => s.visible).length;
     return { bytes: Buffer.from("%PDF-1.7\n% fake\n"), pages: Math.max(1, Math.ceil(sections / 4)) };
-  }
-
-  async pageImages(): Promise<Buffer[]> {
-    return [Buffer.from("png-page-1")];
   }
 
   async close() {}
@@ -194,9 +191,13 @@ export const noDb = new Proxy({}, {
  */
 export async function testDb(): Promise<Db> {
   const db = createDb(TEST_DATABASE_URL!);
-  const [{ exists }] = await db.$queryRaw<{ exists: boolean }[]>`select to_regclass('public.users') is not null as exists`;
-  if (!exists) {
-    const sql = readFileSync(path.resolve("prisma/migrations/0_init/migration.sql"), "utf8")
+  // Each migration with a table it creates: applied when that table is missing
+  const migrations: [string, string][] = [["0_init", "users"], ["1_user_fields", "user_fields"]];
+  for (const [name, table] of migrations) {
+    const [{ exists }] = await db.$queryRawUnsafe<{ exists: boolean }[]>(
+      `select to_regclass('public.${table}') is not null as exists`);
+    if (exists) continue;
+    const sql = readFileSync(path.resolve(`prisma/migrations/${name}/migration.sql`), "utf8")
       .split("\n").filter((line) => !line.trim().startsWith("--")).join("\n");
     for (const statement of sql.split(";").map((s) => s.trim()).filter(Boolean)) {
       await db.$executeRawUnsafe(statement);
