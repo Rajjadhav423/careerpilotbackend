@@ -2,7 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "src/app.ts": {
-      "includeFiles": "{docengine/**,prisma/schema.prisma}",
+      "includeFiles": "{docengine/**,prisma/schema.prisma,node_modules/pdfkit/js/standard-fonts/**,node_modules/pdfkit/js/data/**}",
       "maxDuration": 30
     }
   }
