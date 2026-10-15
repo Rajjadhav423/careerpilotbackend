@@ -289,6 +289,7 @@ describe.skipIf(!TEST_DATABASE_URL)("API with PostgreSQL", () => {
       const retry = await upload();
       expect(retry.body.id).toBe(first.body.id);
       expect(t.drive.uploads).toBe(1);
+      expect(t.drive.shared.size).toBe(1);
 
       const folders = await api().get("/api/v1/drive/folders").set(auth());
       expect(folders.body).toEqual([{ id: first.body.folderId, name: "CareerPilot", selected: true }]);

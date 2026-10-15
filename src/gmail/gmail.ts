@@ -4,7 +4,7 @@ import { currentUser } from "../auth/clerk.js";
 import { ApiError } from "../http/errors.js";
 import type { User } from "../users/users.js";
 import { GMAIL_SEND_SCOPE, type GoogleAccessToken, type GoogleAccounts } from "./google-accounts.js";
-import { buildMimeMessage } from "./mime.js";
+import { buildMimeMessage, type MimeAttachment } from "./mime.js";
 
 /*
  * Gmail for the signed-in user only: the Clerk user id always comes from their verified session token, so nobody
@@ -92,7 +92,7 @@ export class GmailService {
   }
 
   /** Sends from the user's own Gmail. Returns only after Gmail confirms it accepted the message. */
-  async send(user: User, to: string, subject: string, body: string): Promise<SentMessage> {
+  async send(user: User, to: string, subject: string, body: string, attachment?: MimeAttachment): Promise<SentMessage> {
     if (!this.accounts.configured) {
       throw new ApiError(503, "GMAIL_NOT_CONFIGURED", "Gmail isn't set up on this server yet.");
     }
@@ -102,7 +102,7 @@ export class GmailService {
       throw new ApiError(409, "GMAIL_PERMISSION_MISSING",
         "Your Google connection doesn't allow sending email yet. Reconnect Gmail and allow sending.");
     }
-    return this.gmail.send(token, buildMimeMessage(to, subject, body));
+    return this.gmail.send(token, buildMimeMessage(to, subject, body, attachment));
   }
 }
 

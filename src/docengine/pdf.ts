@@ -670,6 +670,8 @@ export function toReactPdf(doc: Doc, presetStyles: Record<string, StyleMap>): Re
     producer: "CareerPilot",
   }, h(Page, {
     size: doc.page.size === "LETTER" ? "LETTER" : "A4",
-    style: { paddingTop: top, paddingRight: right, paddingBottom: bottom, paddingLeft: left, ...body.style },
+    // No ligatures: fi/fl/ft glyphs extract as "f" alone ("Sofware"), which breaks ATS keyword matching
+    style: { paddingTop: top, paddingRight: right, paddingBottom: bottom, paddingLeft: left, ...body.style,
+      fontFeatureSettings: { liga: false, clig: false } as unknown as string },
   }, ...sections, pageNumbers));
 }

@@ -6,6 +6,7 @@ import { currentUser } from "../auth/clerk.js";
 import type { Db, Tx } from "../db/prisma.js";
 import { ApiError } from "../http/errors.js";
 import { body, requiredText, uuidParam } from "../http/validate.js";
+import type { UserFieldService } from "../users/fields.js";
 import { invalidPlaceholders, MERGE_FIELDS, mergeFieldResponses, resolve } from "./merge-fields.js";
 
 /* The signed-in user's email templates. Templates of other users are never visible (404). */
@@ -47,7 +48,12 @@ export type TemplateRequest = z.infer<typeof templateSchema>;
 const notFound = () => new ApiError(404, "TEMPLATE_NOT_FOUND", "Template not found.");
 
 export class TemplateService {
-  constructor(private readonly db: Db) {}
+  constructor(private readonly db: Db, private readonly fields?: UserFieldService) {}
+
+  /** The user's saved details (Settings), usable as {{key}} in templates. */
+  async detailValues(userId: string): Promise<Record<string, string>> {
+    return this.fields ? this.fields.values(userId) : {};
+  }
 
   /** Default template first, then by name. */
   async list(userId: string): Promise<EmailTemplate[]> {
@@ -67,7 +73,7 @@ export class TemplateService {
   }
 
   async create(userId: string, request: TemplateRequest): Promise<EmailTemplate> {
-    requireOnlyAllowlistedPlaceholders(request.subject, request.body);
+    requireOnlyAllowlistedPlaceholders(request.subject, request.body, new Set(Object.keys(await this.detailValues(userId))));
     return this.db.$transaction(async (tx) => {
       await requireBelowLimit(tx, userId);
       if (request.isDefault) await tx.emailTemplate.updateMany({ where: { userId, isDefault: true }, data: { isDefault: false } });
@@ -79,7 +85,7 @@ export class TemplateService {
 
   async update(userId: string, id: string, request: TemplateRequest): Promise<EmailTemplate> {
     await this.get(userId, id);
-    requireOnlyAllowlistedPlaceholders(request.subject, request.body);
+    requireOnlyAllowlistedPlaceholders(request.subject, request.body, new Set(Object.keys(await this.detailValues(userId))));
     return this.db.$transaction(async (tx) => {
       if (request.isDefault) {
         await tx.emailTemplate.updateMany({ where: { userId, isDefault: true, id: { not: id } }, data: { isDefault: false } });
@@ -114,19 +120,20 @@ async function requireBelowLimit(tx: Tx, userId: string) {
   }
 }
 
-/** Fills every merge field with sample data, for the template editor's preview. */
-export function previewTemplate(subject: string | null | undefined, body: string | null | undefined) {
-  const samples = Object.fromEntries(MERGE_FIELDS.map((field) => [field.key, field.sample]));
+/** Fills every merge field with sample data (saved details with their real values), for the editor's preview. */
+export function previewTemplate(subject: string | null | undefined, body: string | null | undefined,
+  details: Record<string, string> = {}) {
+  const samples = { ...Object.fromEntries(MERGE_FIELDS.map((field) => [field.key, field.sample])), ...details };
   const s = resolve(subject ?? "", samples);
   const b = resolve(body ?? "", samples);
   return { subject: s.text, body: b.text, unknownPlaceholders: [...new Set([...s.unknown, ...b.unknown])] };
 }
 
-function requireOnlyAllowlistedPlaceholders(subject: string, body: string) {
-  const invalid = [...new Set([...invalidPlaceholders(subject), ...invalidPlaceholders(body)])];
+function requireOnlyAllowlistedPlaceholders(subject: string, body: string, details: ReadonlySet<string> = new Set()) {
+  const invalid = [...new Set([...invalidPlaceholders(subject, details), ...invalidPlaceholders(body, details)])];
   if (invalid.length > 0) {
     throw new ApiError(400, "UNKNOWN_PLACEHOLDERS",
-      `These placeholders aren't supported: ${invalid.join(", ")}. Use the merge field menu to insert supported fields.`);
+      `These placeholders aren't supported: ${invalid.join(", ")}. Use Insert field, or add the detail in Settings.`);
   }
 }
 
@@ -148,9 +155,9 @@ export function templatesRouter(templates: TemplateService): Router {
   });
 
   /** Fills merge fields with sample data. Nothing is saved. */
-  router.post("/preview", (req, res) => {
+  router.post("/preview", async (req, res) => {
     const request = body(req, previewSchema);
-    res.json(previewTemplate(request.subject, request.body));
+    res.json(previewTemplate(request.subject, request.body, await templates.detailValues(currentUser(res).id)));
   });
 
   router.get("/:id", async (req, res) => {

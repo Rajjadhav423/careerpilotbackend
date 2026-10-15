@@ -48,6 +48,8 @@ export interface DriveClient {
     content: Uint8Array): Promise<DriveFile>;
   update(token: string, fileId: string, changes: Record<string, unknown>): Promise<DriveFile>;
   download(token: string, fileId: string, maxBytes: number): Promise<Buffer>;
+  /** Lets anyone with the link view the file (no sign-in needed). */
+  shareWithLink(token: string, fileId: string): Promise<void>;
 }
 
 function requireFileId(fileId: string | null | undefined) {
@@ -124,6 +126,15 @@ export class GoogleDriveClient implements DriveClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(changes),
     })) as DriveFile;
+  }
+
+  async shareWithLink(token: string, fileId: string): Promise<void> {
+    requireFileId(fileId);
+    await this.send(token, `/drive/v3/files/${fileId}/permissions?sendNotificationEmail=false`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "reader", type: "anyone", allowFileDiscovery: false }),
+    });
   }
 
   /** File content, refusing anything larger than maxBytes. */

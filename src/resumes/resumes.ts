@@ -63,10 +63,26 @@ export const resumeRequestSchema = z.object({
     .max(120, "size must be between 0 and 120").refine((v) => v.trim() !== "", "is required"),
   templateId,
   pageSize,
-  data,
+  data: z.unknown().optional(),
   document: documentJson,
   baseDocument,
-});
+}).superRefine((value, ctx) => {
+  if (hasDocument(value)) return;
+  const parsed = data.safeParse(value.data);
+  if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ ...issue, path: ["data", ...issue.path] });
+}).transform((value) => ({ ...value, data: formData(value) }));
+
+const hasDocument = (value: { document?: unknown }) => value.document !== undefined && value.document !== null;
+
+/**
+ * With a document, the document is what's printed and the form is only a copy that may be stale or incomplete: it's
+ * cleaned up instead of rejected. Without one, the form must be valid.
+ */
+function formData(value: { data?: unknown; document?: unknown }): ResumeData {
+  if (!hasDocument(value)) return data.parse(value.data) as ResumeData;
+  const parsed = resumeDataSchema.safeParse(value.data);
+  return parsed.success ? parsed.data as ResumeData : normalize(value.data);
+}
 
 /** Render resume data that may not be saved yet (preview, download, save to Drive). */
 export const renderRequestSchema = z.object({
@@ -91,13 +107,18 @@ export const saveToDriveSchema = z.object({
   requestId: uuid,
   templateId,
   pageSize,
-  data,
+  // Not checked when a document is sent: the document is what gets printed, and the form may be stale or empty
+  data: z.unknown().optional(),
   document: documentJson,
   baseDocument,
   fileName: z.string().max(150, "size must be between 0 and 150").nullish(),
   folderId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/, "is not a folder id").nullish(),
   resumeId: z.string().uuid("must be a valid id").nullish(),
-});
+}).superRefine((value, ctx) => {
+  if (hasDocument(value)) return;
+  const parsed = data.safeParse(value.data);
+  if (!parsed.success) for (const issue of parsed.error.issues) ctx.addIssue({ ...issue, path: ["data", ...issue.path] });
+}).transform((value) => ({ ...value, data: formData(value) }));
 
 export type ResumeRequest = z.infer<typeof resumeRequestSchema>;
 export type ProposalRequest = z.infer<typeof proposalRequestSchema>;

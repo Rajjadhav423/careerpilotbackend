@@ -10,21 +10,40 @@ import { randomUUID } from "node:crypto";
 
 const CRLF = "\r\n";
 
-export function buildMimeMessage(to: string, subject: string, textBody: string): string {
+/** A PDF attached to the email, e.g. a resume rendered by CareerPilot. */
+export type MimeAttachment = { fileName: string; content: Uint8Array };
+
+export function buildMimeMessage(to: string, subject: string, textBody: string, attachment?: MimeAttachment): string {
   requireSingleLine("recipient", to);
   requireSingleLine("subject", subject);
   const boundary = `careerpilot_${randomUUID().replaceAll("-", "")}`;
   const text = normaliseLineBreaks(textBody);
+  const alternative = part(boundary, "text/plain", text) + part(boundary, "text/html", toHtml(text)) + `--${boundary}--${CRLF}`;
+  const headers = `To: ${to}${CRLF}Subject: ${encodeHeader(subject)}${CRLF}MIME-Version: 1.0${CRLF}`;
+  if (!attachment) return `${headers}Content-Type: multipart/alternative; boundary="${boundary}"${CRLF}${CRLF}${alternative}`;
+
+  // multipart/mixed: the text and HTML versions, then the PDF
+  const mixed = `careerpilot_${randomUUID().replaceAll("-", "")}`;
   return (
-    `To: ${to}${CRLF}` +
-    `Subject: ${encodeHeader(subject)}${CRLF}` +
-    `MIME-Version: 1.0${CRLF}` +
-    `Content-Type: multipart/alternative; boundary="${boundary}"${CRLF}` +
-    CRLF +
-    part(boundary, "text/plain", text) +
-    part(boundary, "text/html", toHtml(text)) +
-    `--${boundary}--${CRLF}`
+    `${headers}Content-Type: multipart/mixed; boundary="${mixed}"${CRLF}${CRLF}` +
+    `--${mixed}${CRLF}Content-Type: multipart/alternative; boundary="${boundary}"${CRLF}${CRLF}${alternative}` +
+    pdfPart(mixed, attachment) +
+    `--${mixed}--${CRLF}`
   );
+}
+
+function pdfPart(boundary: string, attachment: MimeAttachment) {
+  // Quotes, backslashes and line breaks can't end the header early; non-ASCII names are RFC 2047 encoded
+  const name = attachment.fileName.replace(/["\\\r\n]/g, " ").trim() || "Resume.pdf";
+  const quoted = encodeHeader(name);
+  const lines = Buffer.from(attachment.content).toString("base64").match(/.{1,76}/g) ?? [];
+  return `--${boundary}${CRLF}`
+    + `Content-Type: application/pdf; name="${quoted}"${CRLF}`
+    + `Content-Disposition: attachment; filename="${quoted}"${CRLF}`
+    + `Content-Transfer-Encoding: base64${CRLF}`
+    + CRLF
+    + lines.join(CRLF)
+    + CRLF;
 }
 
 /** Escapes the five HTML-significant characters. Values are never interpreted as markup. */

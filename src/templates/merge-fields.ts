@@ -68,12 +68,16 @@ export type Resolution = {
 };
 
 /** Fills allowlisted placeholders that have a non-blank value; never invents values for the rest. */
+/**
+ * Fills allowlisted placeholders (and the user's saved details, passed in `values`) that have a non-blank value;
+ * never invents values for the rest.
+ */
 export function resolve(text: string, values: Record<string, string | null | undefined>): Resolution {
   const missing = new Set<string>();
   const unknown = new Set<string>();
   const out = text.replace(PLACEHOLDER, (match, inner: string) => {
     const key = inner.trim();
-    if (!isMergeField(key)) {
+    if (!isMergeField(key) && !(key in values)) {
       unknown.add(match);
       return match;
     }
@@ -89,10 +93,11 @@ export function resolve(text: string, values: Record<string, string | null | und
 }
 
 /** Placeholders a template may not contain: not allowlisted, or malformed braces such as "{{job_title". */
-export function invalidPlaceholders(text: string): string[] {
+export function invalidPlaceholders(text: string, extraKeys: ReadonlySet<string> = new Set()): string[] {
   const invalid = new Set<string>();
   for (const match of text.matchAll(PLACEHOLDER)) {
-    if (!isMergeField(match[1]!.trim())) invalid.add(match[0]);
+    const key = match[1]!.trim();
+    if (!isMergeField(key) && !extraKeys.has(key)) invalid.add(match[0]);
   }
   for (const stray of strayBraces(text)) invalid.add(stray);
   return [...invalid];

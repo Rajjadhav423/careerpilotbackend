@@ -2,13 +2,14 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 
 import { SvixVerifier } from "../../src/auth/svix.js";
-import { auth, buildApp, memoryUsers, noDb, testConfig, validResume } from "../helpers.js";
+import { auth, buildApp, memoryUserFields, memoryUsers, noDb, testConfig, validResume } from "../helpers.js";
 
 /* The HTTP layer without PostgreSQL: users come from memory and outside services are fakes. */
 
 const app = (overrides: Parameters<typeof buildApp>[1] = {}) =>
   buildApp(noDb, {
     userResolver: memoryUsers,
+    userFields: memoryUserFields({ github: "https://github.com/priya" }),
     boardFetchers: {
       GREENHOUSE: async () => [{
         id: "greenhouse-acme-1", title: "Backend Engineer", company: "Acme", location: "Remote", department: null,
@@ -234,6 +235,10 @@ describe("discovery, Gmail and templates without a database", () => {
     const preview = await request(server).post("/api/v1/email-templates/preview").set(auth())
       .send({ subject: "{{job_title}} at {{company_name}}", body: "Hi {{bogus}}" });
     expect(preview.body).toEqual({ subject: "Backend Engineer at Northwind Labs", body: "Hi {{bogus}}", unknownPlaceholders: ["{{bogus}}"] });
+    // Saved details (Settings) are fields too, shown with their real value
+    const withDetail = await request(server).post("/api/v1/email-templates/preview").set(auth())
+      .send({ subject: "Hi", body: "My work: {{github}}" });
+    expect(withDetail.body).toMatchObject({ body: "My work: https://github.com/priya", unknownPlaceholders: [] });
   });
 });
 

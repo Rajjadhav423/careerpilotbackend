@@ -353,8 +353,16 @@ export class DriveService {
       const folder = await this.resolveUploadFolder(user, folderId);
       const taken = await this.namesIn(user, folder.id);
       const name = uniqueName(pdfName(fileName), taken);
-      file = await this.withToken(user, (token) => this.drive.upload(token, name, folder.id, PDF,
+      const uploaded = await this.withToken(user, (token) => this.drive.upload(token, name, folder.id, PDF,
         { [APP_KEY]: DOCUMENT_MARKER, [REQUEST_KEY]: requestId }, content));
+      file = uploaded;
+      // Shareable straight away: anyone with the link can view it (e.g. as {{resume_url}} in an email)
+      try {
+        await this.withToken(user, (token) => this.drive.shareWithLink(token, uploaded.id));
+      } catch {
+        // Some Google Workspace accounts forbid public links: the file stays private, the upload still counts
+        console.warn("Couldn't make the Drive file viewable by link");
+      }
     }
     return toResponse(await this.record(user.id, file, requestId, resumeId));
   }

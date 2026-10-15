@@ -19,9 +19,9 @@ import type { GoogleAccounts } from "./gmail/google-accounts.js";
 import { errorHandler, notFoundHandler } from "./http/errors.js";
 import { requestLogger } from "./http/request-logger.js";
 import { JobService, jobsRouter } from "./jobs/jobs.js";
-import { ResumeDocuments, ResumeService, resumesRouter } from "./resumes/resumes.js";
+import { ResumeDocuments, resumeFileName, ResumeService, resumesRouter } from "./resumes/resumes.js";
 import { TemplateService, templatesRouter } from "./templates/templates.js";
-import { UserFieldService, userFieldsRouter } from "./users/fields.js";
+import { fillFields, UserFieldService, userFieldsRouter } from "./users/fields.js";
 import { toMeResponse, UserService } from "./users/users.js";
 
 /*
@@ -39,6 +39,8 @@ export type AppDependencies = {
   driveClient: DriveClient;
   pdf: PdfRenderer;
   boardFetchers?: Partial<Record<BoardProvider, BoardFetcher>>;
+  /** Saved details ({{github}} …); defaults to the user_fields table (tests can skip the database) */
+  userFields?: UserFieldService;
   /** Looks up the signed-in user; defaults to the users table (tests can skip the database) */
   userResolver?: Pick<UserService, "resolve">;
   now?: () => Date;
@@ -52,16 +54,25 @@ export function createApp(deps: AppDependencies): App {
 
   const users = new UserService(db);
   const jobs = new JobService(db);
-  const templates = new TemplateService(db);
+  const userFields = deps.userFields ?? new UserFieldService(db);
+  const templates = new TemplateService(db, userFields);
   const gmail = new GmailService(deps.googleAccounts, deps.gmailSender);
-  const applicationEmails = new ApplicationEmailService(db, jobs, templates, gmail, now);
   const boards = (config.discoveryBoards.length > 0 ? config.discoveryBoards : DEFAULT_BOARDS).map(parseBoard);
   const discovery = new DiscoveryService(boards, deps.boardFetchers ?? defaultFetchers(), undefined, now);
   const engine = new DocEngine(new DocPresets(), deps.pdf);
   const drive = new DriveService(db, deps.googleAccounts, deps.driveClient);
   const resumeDocuments = new ResumeDocuments(engine);
   const resumes = new ResumeService(db, resumeDocuments, config.resumeVersionsEnabled);
-  const userFields = new UserFieldService(db);
+  // A saved resume as the PDF attached to an application email: its document (or form), saved details filled in
+  const resumePdf = async (user: { id: string }, resumeId: string) => {
+    const resume = await resumes.get(user.id, resumeId);
+    const document = resume.document ?? resumeDocuments.toDocument(resume.templateId, resume.pageSize, resume.data);
+    const pdf = await resumeDocuments.renderDocumentPdf(await fillFields(userFields, user.id, document));
+    // "<Name> - Resume.pdf", the name read from what's printed (the form copy of a document can be stale)
+    const named = resume.document ? resumeDocuments.toForm(resume.document).data : resume.data;
+    return { fileName: resumeFileName(null, named), content: pdf.bytes };
+  };
+  const applicationEmails = new ApplicationEmailService(db, jobs, templates, gmail, now, resumePdf);
 
   const app = express();
   app.disable("x-powered-by");

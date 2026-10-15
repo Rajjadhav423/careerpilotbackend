@@ -12,6 +12,7 @@ import type { GmailSender, SentMessage } from "../src/gmail/gmail.js";
 import {
   DRIVE_FILE_SCOPE, GMAIL_SEND_SCOPE, type GoogleAccessToken, type GoogleAccount, type GoogleAccounts,
 } from "../src/gmail/google-accounts.js";
+import type { UserFieldService } from "../src/users/fields.js";
 import type { User } from "../src/users/users.js";
 
 /* Fakes for every outside service, so tests never reach Clerk, Google, job boards or Chromium. */
@@ -46,6 +47,15 @@ export const fakeVerifier: TokenVerifier = async (token) => {
 };
 
 export const auth = (clerkUserId = "user_1") => ({ Authorization: `Bearer user:${clerkUserId}` });
+
+/** Saved details kept in memory (for HTTP tests without PostgreSQL). */
+export function memoryUserFields(values: Record<string, string> = {}) {
+  return {
+    list: async () => Object.entries(values).map(([key, value]) => ({ key, label: key, value })),
+    replace: async () => [],
+    values: async () => values,
+  } as unknown as UserFieldService;
+}
 
 /** A resolver that never touches the database (for HTTP tests without PostgreSQL). */
 export const memoryUsers = {
@@ -132,6 +142,13 @@ export class FakeDrive implements DriveClient {
     if (!file) throw new DriveApiError(404, null);
     Object.assign(file, changes);
     return file;
+  }
+
+  /** Files made viewable by link */
+  shared = new Set<string>();
+
+  async shareWithLink(_token: string, fileId: string) {
+    this.shared.add(fileId);
   }
 
   async download(_token: string, fileId: string) {

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { currentUser } from "../auth/clerk.js";
 import type { Db } from "../db/prisma.js";
 import type { GmailService } from "../gmail/gmail.js";
+import type { MimeAttachment } from "../gmail/mime.js";
 import { ApiError } from "../http/errors.js";
 import { body, uuidParam } from "../http/validate.js";
 import type { Job, JobService, JobStatus } from "../jobs/jobs.js";
@@ -40,10 +41,18 @@ export const sendSchema = z.object({
   subject: notBlank(255).pipe(z.string().regex(/^[^\r\n]*$/, "must be a single line")),
   body: notBlank(20_000),
   templateId: uuid.nullish(),
+  /** One of the user's saved resumes, attached as a PDF */
+  resumeId: uuid.nullish(),
   confirmed: z.boolean().nullish(),
 });
 
 export type SendRequest = z.infer<typeof sendSchema>;
+
+/** A saved resume as a PDF attachment. */
+export type ResumePdf = (user: User, resumeId: string) => Promise<MimeAttachment>;
+
+/** Gmail's API accepts messages up to about 5 MB when sent inline; base64 adds a third. */
+const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
 
 export type ComposeResponse = {
   templateId: string | null;
@@ -98,6 +107,8 @@ export class ApplicationEmailService {
     private readonly templates: TemplateService,
     private readonly gmail: GmailService,
     private readonly now: () => Date = () => new Date(),
+    /** Renders one of the user's saved resumes as a PDF; throws 404 for anyone else's */
+    private readonly resumePdf?: ResumePdf,
   ) {}
 
   async compose(user: User, jobId: string, templateId: string | null | undefined, timeZone: string | null | undefined)
@@ -109,7 +120,11 @@ export class ApplicationEmailService {
     if (!template) {
       return { templateId: null, templateName: null, subject: "", body: "", missingFields: [], unknownPlaceholders: [] };
     }
-    const values = mergeValues(user, job, timeZone, this.now());
+    // Saved details (Settings) fill anything the account and job don't have, e.g. {{resume_url}} or {{github}}
+    const builtIn = mergeValues(user, job, timeZone, this.now());
+    const details = await this.templates.detailValues(user.id);
+    const values: Record<string, string | null> = { ...details };
+    for (const [key, value] of Object.entries(builtIn)) if (value != null && value.trim() !== "") values[key] = value;
     const subject = resolve(template.subject, values);
     const text = resolve(template.body, values);
     const missing = new Set([...subject.missing, ...text.missing]);
@@ -140,7 +155,9 @@ export class ApplicationEmailService {
     // Talks to Gmail outside any database transaction; nothing is recorded unless Gmail accepts the message
     const to = request.to.trim();
     const subject = request.subject.trim();
-    const sent = await this.gmail.send(user, to, subject, request.body);
+    // Rendered on the server from the user's own saved resume: nothing uploaded from the browser is attached
+    const attachment = request.resumeId ? await this.attachment(user, request.resumeId) : undefined;
+    const sent = await this.gmail.send(user, to, subject, request.body, attachment);
     const sentAt = this.now();
 
     return this.db.$transaction(async (tx) => {
@@ -151,6 +168,15 @@ export class ApplicationEmailService {
       const updated = await this.jobs.recordApplicationSent(user.id, job.id, sentAt, tx);
       return { id: record.id, sentAt, jobStatus: updated.status, appliedAt: updated.appliedAt };
     });
+  }
+
+  private async attachment(user: User, resumeId: string): Promise<MimeAttachment> {
+    if (!this.resumePdf) throw new ApiError(503, "ATTACHMENTS_UNAVAILABLE", "Attaching a resume isn't available right now.");
+    const pdf = await this.resumePdf(user, resumeId);
+    if (pdf.content.byteLength > MAX_ATTACHMENT_BYTES) {
+      throw new ApiError(422, "ATTACHMENT_TOO_LARGE", "The resume PDF is too large to attach. Send its Drive link instead.");
+    }
+    return pdf;
   }
 
   /** Emails Gmail accepted for this job, newest first. */

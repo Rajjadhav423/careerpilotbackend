@@ -53,6 +53,11 @@ export function documentLink(value: string | null | undefined): string | null {
   if (value == null) return null;
   const trimmed = value.trim();
   if (FIELD_PLACEHOLDER.test(trimmed)) return trimmed;
+  // "mailto:{{email}}" / "tel:{{phone}}": kept as written; filled in and checked again before any preview or PDF
+  const scheme = /^(mailto|tel):/i.exec(trimmed);
+  if (scheme && FIELD_PLACEHOLDER.test(trimmed.slice(scheme[0].length).trim())) {
+    return `${scheme[1]!.toLowerCase()}:${trimmed.slice(scheme[0].length).trim()}`;
+  }
   if (trimmed.slice(0, 7).toLowerCase() === "mailto:") {
     return trimmed.length <= MAX_URL_LENGTH && MAILTO.test(trimmed) ? `mailto:${trimmed.slice(7)}` : null;
   }
@@ -60,6 +65,8 @@ export function documentLink(value: string | null | undefined): string | null {
     const match = TEL.exec(trimmed);
     return match ? `tel:${match[1]!.replace(/[ ().-]/g, "")}` : null;
   }
+  // A bare address (e.g. {{email}} filled in) is an email link, not "https://name@host" (rejected as a disguised host)
+  if (!trimmed.includes(":") && !trimmed.includes("/") && MAILTO.test(`mailto:${trimmed}`)) return `mailto:${trimmed}`;
   return webLink(trimmed);
 }
 
