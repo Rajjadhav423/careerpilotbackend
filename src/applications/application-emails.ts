@@ -43,6 +43,8 @@ export const sendSchema = z.object({
   templateId: uuid.nullish(),
   /** One of the user's saved resumes, attached as a PDF */
   resumeId: uuid.nullish(),
+  /** One of the user's CareerPilot PDFs in Google Drive, attached as is (e.g. the resume linked in the email) */
+  driveDocumentId: uuid.nullish(),
   confirmed: z.boolean().nullish(),
 });
 
@@ -109,6 +111,8 @@ export class ApplicationEmailService {
     private readonly now: () => Date = () => new Date(),
     /** Renders one of the user's saved resumes as a PDF; throws 404 for anyone else's */
     private readonly resumePdf?: ResumePdf,
+    /** Downloads one of the user's CareerPilot PDFs from Drive; throws 404 for anyone else's */
+    private readonly drivePdf?: ResumePdf,
   ) {}
 
   async compose(user: User, jobId: string, templateId: string | null | undefined, timeZone: string | null | undefined)
@@ -156,7 +160,9 @@ export class ApplicationEmailService {
     const to = request.to.trim();
     const subject = request.subject.trim();
     // Rendered on the server from the user's own saved resume: nothing uploaded from the browser is attached
-    const attachment = request.resumeId ? await this.attachment(user, request.resumeId) : undefined;
+    const attachment = request.driveDocumentId
+      ? await this.attachment(user, request.driveDocumentId, this.drivePdf)
+      : request.resumeId ? await this.attachment(user, request.resumeId, this.resumePdf) : undefined;
     const sent = await this.gmail.send(user, to, subject, request.body, attachment);
     const sentAt = this.now();
 
@@ -170,9 +176,9 @@ export class ApplicationEmailService {
     });
   }
 
-  private async attachment(user: User, resumeId: string): Promise<MimeAttachment> {
-    if (!this.resumePdf) throw new ApiError(503, "ATTACHMENTS_UNAVAILABLE", "Attaching a resume isn't available right now.");
-    const pdf = await this.resumePdf(user, resumeId);
+  private async attachment(user: User, id: string, load: ResumePdf | undefined): Promise<MimeAttachment> {
+    if (!load) throw new ApiError(503, "ATTACHMENTS_UNAVAILABLE", "Attaching a resume isn't available right now.");
+    const pdf = await load(user, id);
     if (pdf.content.byteLength > MAX_ATTACHMENT_BYTES) {
       throw new ApiError(422, "ATTACHMENT_TOO_LARGE", "The resume PDF is too large to attach. Send its Drive link instead.");
     }

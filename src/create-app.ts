@@ -16,13 +16,13 @@ import { DriveService, driveRouter } from "./drive/drive.js";
 import type { DriveClient } from "./drive/google-drive.js";
 import { GmailService, gmailRouter, type GmailSender } from "./gmail/gmail.js";
 import type { GoogleAccounts } from "./gmail/google-accounts.js";
-import { errorHandler, notFoundHandler } from "./http/errors.js";
+import { ApiError, errorHandler, notFoundHandler } from "./http/errors.js";
 import { requestLogger } from "./http/request-logger.js";
 import { JobService, jobsRouter } from "./jobs/jobs.js";
 import { ResumeDocuments, resumeFileName, ResumeService, resumesRouter } from "./resumes/resumes.js";
 import { TemplateService, templatesRouter } from "./templates/templates.js";
 import { fillFields, UserFieldService, userFieldsRouter } from "./users/fields.js";
-import { toMeResponse, UserService } from "./users/users.js";
+import { toMeResponse, UserService, type User } from "./users/users.js";
 
 /*
  * The HTTP API under /api/v1. Every route needs a valid Clerk session token except GET /health and the Clerk webhook
@@ -72,7 +72,13 @@ export function createApp(deps: AppDependencies): App {
     const named = resume.document ? resumeDocuments.toForm(resume.document).data : resume.data;
     return { fileName: resumeFileName(null, named), content: pdf.bytes };
   };
-  const applicationEmails = new ApplicationEmailService(db, jobs, templates, gmail, now, resumePdf);
+  // A PDF the user saved to Drive with CareerPilot, attached unchanged (only PDFs: nothing else is sent as a resume)
+  const drivePdf = async (user: User, documentId: string) => {
+    const file = await drive.download(user, documentId);
+    if (file.mimeType !== "application/pdf") throw new ApiError(422, "ATTACHMENT_NOT_PDF", "Only PDF resumes can be attached.");
+    return { fileName: file.name, content: file.content };
+  };
+  const applicationEmails = new ApplicationEmailService(db, jobs, templates, gmail, now, resumePdf, drivePdf);
 
   const app = express();
   app.disable("x-powered-by");
