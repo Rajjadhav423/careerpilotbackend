@@ -32,6 +32,9 @@ const schema = z.object({
   PDF_MAX_CONCURRENT: z.coerce.number().int().positive().default(2),
   PDF_MAX_QUEUED: z.coerce.number().int().nonnegative().default(8),
   DISCOVERY_BOARDS: z.string().optional(),
+  /** Shared with the MCP server only; when set, the API accepts its short-lived service tokens. At least 32 characters. */
+  MCP_SERVICE_SECRET: z.string().trim().min(32, "MCP_SERVICE_SECRET must be at least 32 characters").optional()
+    .or(z.literal("").transform(() => undefined)),
 });
 
 export type Config = {
@@ -56,6 +59,8 @@ export type Config = {
     maxQueued: number;
   };
   discoveryBoards: string[];
+  /** Secret for the MCP server's service tokens; null turns them off */
+  mcpServiceSecret: string | null;
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -88,6 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxQueued: e.PDF_MAX_QUEUED,
     },
     discoveryBoards: list(e.DISCOVERY_BOARDS),
+    mcpServiceSecret: e.MCP_SERVICE_SECRET ?? null,
   };
 }
 

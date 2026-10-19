@@ -223,6 +223,29 @@ describe.skipIf(!TEST_DATABASE_URL)("API with PostgreSQL", () => {
       expect((await api().get(`/api/v1/resumes/${created.body.id}`).set(auth())).body.code).toBe("RESUME_NOT_FOUND");
     });
 
+    it("keeps one AI copy per user, apart from the user's resumes", async () => {
+      const mine = await save({ title: "Resume" });
+      const first = await api().put("/api/v1/resumes/ai-copy").set(auth()).send({ title: "Resume", data: validResume() });
+      expect(first.status).toBe(201);
+      expect(first.body).toMatchObject({ title: "Resume", aiCopy: true });
+      expect(first.body.id).not.toBe(mine.body.id);
+
+      const data = validResume();
+      data.basics.fullName = "Priya Tailored";
+      const again = await api().put("/api/v1/resumes/ai-copy").set(auth()).send({ title: "Resume", data });
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ id: first.body.id, aiCopy: true });
+      expect(again.body.data.basics.fullName).toBe("Priya Tailored");
+
+      const list = (await api().get("/api/v1/resumes").set(auth())).body as { id: string; aiCopy: boolean }[];
+      expect(list.filter((r) => r.aiCopy).map((r) => r.id)).toEqual([first.body.id]);
+      expect((await api().get(`/api/v1/resumes/${mine.body.id}`).set(auth())).body).toMatchObject({ aiCopy: false });
+
+      const other = await api().put("/api/v1/resumes/ai-copy").set(auth("other")).send({ title: "Resume", data: validResume() });
+      expect(other.status).toBe(201);
+      expect(other.body.id).not.toBe(first.body.id);
+    });
+
     it("stores a validated document", async () => {
       const document = (await api().post("/api/v1/resumes/document").set(auth()).send({ data: validResume() })).body;
       const created = await save({ document });

@@ -6,6 +6,7 @@ import { currentUser } from "../auth/clerk.js";
 import type { Db, Tx } from "../db/prisma.js";
 import { ApiError } from "../http/errors.js";
 import { body, flag, httpUrlOrEmpty, optionalText, query, requiredText, uuidParam } from "../http/validate.js";
+import { importJobFromUrl } from "./import-from-url.js";
 
 /* The signed-in user's job board. Every query takes the owner's id; other users' jobs behave as missing (404). */
 
@@ -185,6 +186,13 @@ export function jobsRouter(jobs: JobService): Router {
     const result = await jobs.create(currentUser(res).id, body(req, createJobSchema));
     if (result.created) res.status(201).location(`/api/v1/jobs/${result.job.id}`);
     res.json(result.job);
+  });
+
+  /** Reads a job posting from a link ({ "url": "https://…" }) without saving it. */
+  router.post("/import-from-url", async (req, res) => {
+    currentUser(res);
+    const { url } = body(req, z.object({ url: z.string().max(2048, "size must be between 0 and 2048") }));
+    res.json(await importJobFromUrl(url));
   });
 
   router.get("/:id", async (req, res) => {

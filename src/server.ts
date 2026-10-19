@@ -1,5 +1,6 @@
 import { createApp } from "./create-app.js";
 import { clerkTokenVerifier } from "./auth/clerk.js";
+import { withServiceTokens } from "./auth/service-token.js";
 import { describeConfig, loadConfig } from "./config.js";
 import { createDb } from "./db/prisma.js";
 import { ReactPdfRenderer } from "./docengine/pdf.js";
@@ -18,7 +19,7 @@ const pdf = new ReactPdfRenderer(config.pdf);
 const { app, engine } = createApp({
   config,
   db,
-  verifyToken: clerkTokenVerifier(config.clerk),
+  verifyToken: withServiceTokens(clerkTokenVerifier(config.clerk), config.mcpServiceSecret),
   googleAccounts: new ClerkGoogleAccounts(config.clerk.secretKey),
   gmailSender: new GmailApiClient(),
   driveClient: new GoogleDriveClient(),

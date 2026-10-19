@@ -35,6 +35,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     resumeVersionsEnabled: false,
     pdf: { maxPages: 10, maxBytes: 5 * 1024 * 1024, renderTimeoutMs: 20_000, maxConcurrent: 2, maxQueued: 8 },
     discoveryBoards: ["greenhouse:acme:Acme"],
+    mcpServiceSecret: null,
     ...overrides,
   };
 }

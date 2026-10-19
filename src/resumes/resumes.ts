@@ -136,6 +136,8 @@ export type ResumeResponse = {
   pageSize: PageSize;
   data: ResumeData;
   document: Record<string, unknown> | null;
+  /** The assistant's tailored copy, not a resume the user wrote */
+  aiCopy: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -253,6 +255,7 @@ export class ResumeService {
       templateId: row.templateId,
       pageSize: row.pageSize as PageSize,
       fullName: normalize(readResumeJson(row.data)).basics.fullName,
+      aiCopy: row.aiCopy,
       pendingProposals: pending.get(row.id) ?? 0,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -291,6 +294,31 @@ export class ResumeService {
       } });
       await this.recordVersion(tx, resume, null, "EDITOR", "SAVED");
       return response(resume);
+    });
+  }
+
+  /**
+   * Creates or replaces the user's single AI copy: the resume an assistant tailors for each application, so the
+   * resumes the user writes never change. `created` tells whether it was made now.
+   */
+  async saveAiCopy(userId: string, request: ResumeRequest): Promise<ResumeResponse & { created: boolean }> {
+    const template = this.documents.template(request.templateId).id;
+    const document = this.document(this.requestDocument(request));
+    const content = {
+      title: request.title.trim(), templateId: template, pageSize: request.pageSize ?? "A4",
+      data: asJson(normalize(request.data)), document: jsonOrNull(document),
+    };
+    return this.db.$transaction(async (tx) => {
+      const existing = await tx.resume.findFirst({ where: { userId, aiCopy: true }, select: { id: true } });
+      if (!existing && await tx.resume.count({ where: { userId } }) >= MAX_RESUMES_PER_USER) {
+        throw new ApiError(409, "RESUME_LIMIT_REACHED",
+          `You can keep up to ${MAX_RESUMES_PER_USER} resumes. Delete one you no longer need.`);
+      }
+      const resume = existing
+        ? await tx.resume.update({ where: { id: existing.id }, data: content })
+        : await tx.resume.create({ data: { userId, aiCopy: true, ...content } });
+      await this.recordVersion(tx, resume, existing ? "Tailored by AI" : "Created by AI", "AI", "SAVED");
+      return { ...response(resume), created: !existing };
     });
   }
 
@@ -457,6 +485,7 @@ function response(resume: ResumeRow): ResumeResponse {
     pageSize: resume.pageSize as PageSize,
     data: normalize(readResumeJson(resume.data)),
     document: resume.document as JsonDoc | null,
+    aiCopy: resume.aiCopy,
     createdAt: resume.createdAt,
     updatedAt: resume.updatedAt,
   };
@@ -572,6 +601,12 @@ export function resumesRouter(resumes: ResumeService, documents: ResumeDocuments
       throw new ApiError(400, "DOCUMENT_MISSING", "Send { \"document\": { … } }.");
     }
     res.json(documents.toForm(document));
+  });
+
+  /** Creates or replaces the AI copy (one per user): the resume an assistant tailors for applications. */
+  router.put("/ai-copy", async (req, res) => {
+    const { created, ...resume } = await resumes.saveAiCopy(currentUser(res).id, body(req, resumeRequestSchema));
+    res.status(created ? 201 : 200).json(resume);
   });
 
   router.get("/:id", async (req, res) => {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { isAcceptableWebLink } from "../docengine/safe-urls.js";
+import { FIELD_PLACEHOLDER, isAcceptableWebLink } from "../docengine/safe-urls.js";
 import { ApiError } from "../http/errors.js";
 
 /*
@@ -90,9 +90,10 @@ const notBlank = (max: number) =>
 const list = <T extends z.ZodTypeAny>(item: T, max: number) => z.array(item).max(max, size(max)).nullish();
 const id = z.string().regex(ID, ID_MESSAGE).nullish();
 const webLink = z.string().refine(isAcceptableWebLink, "must be a web address starting with http:// or https://");
-/** Like Hibernate's @Email: empty is fine; otherwise local@domain. */
+/** Like Hibernate's @Email: empty is fine; otherwise local@domain, or a saved detail such as {{email}} (filled in when printed). */
 const email = z.string().max(254, size(254))
-  .refine((value) => value === "" || /^[^@\s]+@[^@\s]+$/.test(value), "must be an email address").nullish();
+  .refine((value) => value === "" || FIELD_PLACEHOLDER.test(value) || /^[^@\s]+@[^@\s]+$/.test(value),
+    "must be an email address").nullish();
 const margin = z.number()
   .min(5, "must be greater than or equal to 5")
   .max(40, "must be less than or equal to 40")

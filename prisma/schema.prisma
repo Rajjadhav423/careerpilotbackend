@@ -116,6 +116,8 @@ model Resume {
   pageSize   String   @map("page_size") @db.VarChar(10)
   data       Json
   document   Json?
+  /// The assistant's tailored copy (at most one per user, enforced by a partial unique index in the migration)
+  aiCopy     Boolean  @default(false) @map("ai_copy")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
