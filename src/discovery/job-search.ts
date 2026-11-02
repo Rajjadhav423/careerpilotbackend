@@ -1,10 +1,12 @@
 import { Router } from "express";
 
 import { ApiError } from "../http/errors.js";
-import { flag, query } from "../http/validate.js";
+import { currentUser } from "../auth/clerk.js";
+import { flag, query, UUID } from "../http/validate.js";
 import { classify, TECH_ROLES, type TechRole } from "./classify.js";
 import { dedupe, type Classified } from "./dedupe.js";
 import { parsePlaces } from "./places.js";
+import { matchSkills, type Match } from "./skills.js";
 import { freshMs, type JobPosting, type JobSources, type RawPosting } from "./sources.js";
 
 /*
@@ -19,9 +21,14 @@ const REFRESH_INTERVAL_MS = 60_000;
 export type SourceStatus = { board: string; company: string; provider: string; ok: boolean; count: number; error: string | null };
 export type Facet = { name: string; count: number };
 
+/** A posting with its match to the chosen resume (null: the post names no known skill) */
+export type MatchedPosting = JobPosting & { match?: Match | null };
+
 export type DiscoverResponse = {
-  /** Matching postings, newest first, at most `limit` */
-  jobs: JobPosting[];
+  /** Matching postings, newest first (best resume match first when matching), at most `limit` */
+  jobs: MatchedPosting[];
+  /** Skills read from the chosen resume; null when not matching against a resume */
+  resumeSkills: string[] | null;
   /** Number of matches before the limit was applied */
   total: number;
   /** Matches per role for the current query and place, ignoring the role filter */
@@ -50,6 +57,8 @@ export type DiscoverQuery = {
   role: TechRole | null;
   /** Only postings that give a hiring email */
   hasEmail: boolean;
+  /** Skills of the resume to match against; results are then sorted by match */
+  resumeSkills: string[] | null;
   limit: number;
 };
 
@@ -199,7 +208,8 @@ function search(all: AllJobs, query: DiscoverQuery): DiscoverResponse {
   const matches = query.role ? placeMatches.filter((job) => job.techRole === query.role) : placeMatches;
   const limit = Math.min(Math.max(Math.trunc(query.limit) || 1, 1), MAX_LIMIT);
   return {
-    jobs: matches.slice(0, limit),
+    jobs: query.resumeSkills ? byMatch(matches, new Set(query.resumeSkills)).slice(0, limit) : matches.slice(0, limit),
+    resumeSkills: query.resumeSkills,
     total: matches.length,
     roleCounts,
     facets: { countries, cities, remote: forFacets.filter(isRemote).length, withEmail },
@@ -207,6 +217,18 @@ function search(all: AllJobs, query: DiscoverQuery): DiscoverResponse {
     sources: all.sources,
   };
 }
+
+/** Best match first; then more matched skills; posts without known skills last; newest first within ties. */
+function byMatch(jobs: JobPosting[], resumeSkills: Set<string>): MatchedPosting[] {
+  return jobs
+    .map((job) => ({ ...job, match: matchSkills(job.skills, resumeSkills) }))
+    .sort((a, b) => (b.match?.score ?? -1) - (a.match?.score ?? -1)
+      || (b.match?.matched.length ?? 0) - (a.match?.matched.length ?? 0)
+      || (b.postedAt ?? "").localeCompare(a.postedAt ?? ""));
+}
+
+/** The skills found in one of the user's resumes; throws 404 for a resume they don't own. */
+export type ResumeSkills = (userId: string, resumeId: string) => Promise<string[]>;
 
 const PRESET_HOURS: Record<string, number> = { "24h": 24, "3d": 72, "7d": 168, "30d": 720 };
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -228,7 +250,7 @@ function postedRange(posted: string | undefined, fromText: string, toText: strin
   return { from, to };
 }
 
-export function jobSearchRouter(jobSearch: JobSearch, now: () => Date = () => new Date()): Router {
+export function jobSearchRouter(jobSearch: JobSearch, resumeSkills: ResumeSkills, now: () => Date = () => new Date()): Router {
   const router = Router();
 
   /** Example: GET /api/v1/discover/jobs?q=java&country=India&city=Bengaluru&remote=false&role=BACKEND&posted=7d */
@@ -241,6 +263,9 @@ export function jobSearchRouter(jobSearch: JobSearch, now: () => Date = () => ne
     const limit = rawLimit === undefined ? 100 : Number(rawLimit);
     if (!Number.isInteger(limit)) throw invalid("limit must be a whole number");
     const country = (query(req, "country") ?? "").trim().slice(0, 60) || null;
+    const resumeId = query(req, "resumeId");
+    if (resumeId && !UUID.test(resumeId)) throw invalid("resumeId must be a resume id");
+    const skills = resumeId ? await resumeSkills(currentUser(res).id, resumeId.toLowerCase()) : null;
     const range = postedRange(query(req, "posted"), query(req, "from") ?? "", query(req, "to") ?? "", now());
     res.set("Cache-Control", "private, no-store");
     res.json(await jobSearch.search({
@@ -253,6 +278,7 @@ export function jobSearchRouter(jobSearch: JobSearch, now: () => Date = () => ne
       to: range.to,
       role: (rawRole as TechRole | undefined) ?? null,
       hasEmail: flag(req, "hasEmail"),
+      resumeSkills: skills,
       limit,
     }, flag(req, "refresh")));
   });

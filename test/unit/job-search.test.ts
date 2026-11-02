@@ -8,11 +8,11 @@ const source = (key: string, kind: Source["kind"] = "company"): Source =>
 
 const raw = (id: string, title: string, extra: Partial<RawPosting> = {}): RawPosting => ({
   id, title, company: "Acme", location: "Bengaluru, India", department: null, workplaceType: "UNSPECIFIED",
-  url: `https://jobs.example.com/${id}`, postedAt: "2026-10-01T00:00:00.000Z", source: "Greenhouse", ...extra,
+  url: `https://jobs.example.com/${id}`, postedAt: "2026-10-01T00:00:00.000Z", source: "Greenhouse", skills: [], ...extra,
 });
 
 const query = (extra: Partial<DiscoverQuery> = {}): DiscoverQuery => ({
-  q: "", location: "", country: null, city: null, remote: false, from: null, to: null, role: null, hasEmail: false, limit: 100, ...extra,
+  q: "", location: "", country: null, city: null, remote: false, from: null, to: null, role: null, hasEmail: false, resumeSkills: null, limit: 100, ...extra,
 });
 
 function setup() {
@@ -82,5 +82,30 @@ describe("hiring email in a post", () => {
     expect(findEmail("Send CV to HR@Acme.io.")).toBe("hr@acme.io");
     expect(findEmail("careers@acme.com.acme or hr@acme.co.uk")).toBe("careers@acme.com");
     expect(findEmail("Write to hr@acme.co.uk")).toBe("hr@acme.co.uk");
+  });
+});
+
+describe("resume match", () => {
+  it("reads skills from text, with aliases and without false hits", async () => {
+    const { extractSkills } = await import("../../src/discovery/skills.js");
+    expect(extractSkills("Senior NodeJS / TypeScript engineer, Postgres, k8s on AWS")).toEqual(
+      ["TypeScript", "Node.js", "PostgreSQL", "AWS", "Kubernetes"]);
+    expect(extractSkills("JavaScript developer")).toEqual(["JavaScript"]);
+    expect(extractSkills("Rest of the team will express trust; spring 2027 start")).toEqual([]);
+  });
+
+  it("sorts by match and lists matched and missing skills", async () => {
+    const search = new JobSearch({
+      list: () => [source("greenhouse:acme")],
+      load: async () => [
+        raw("a", "Backend Engineer", { skills: ["Java", "Kafka", "AWS"], postedAt: "2026-10-09T00:00:00.000Z" }),
+        raw("b", "Node.js Developer", { skills: ["Node.js", "TypeScript"] }),
+        raw("c", "Software Engineer"),
+      ],
+    }, () => new Date("2026-10-14T00:00:00Z"));
+    const result = await search.search(query({ resumeSkills: ["Node.js", "TypeScript", "AWS"] }));
+    expect(result.jobs.map((j) => [j.id, j.match?.score ?? null])).toEqual([["b", 100], ["a", 33], ["c", null]]);
+    expect(result.jobs[1]!.match).toMatchObject({ matched: ["AWS"], missing: ["Java", "Kafka"] });
+    expect(result.resumeSkills).toEqual(["Node.js", "TypeScript", "AWS"]);
   });
 });

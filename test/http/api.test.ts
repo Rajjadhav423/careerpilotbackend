@@ -14,7 +14,7 @@ const app = (overrides: Parameters<typeof buildApp>[1] = {}) =>
       list: () => [{ key: "greenhouse:acme", provider: "Greenhouse", board: "greenhouse:acme", company: "Acme", kind: "company" }],
       load: async () => [{
         id: "greenhouse-acme-1", title: "Backend Engineer", company: "Acme", location: "Remote", department: null,
-        workplaceType: "REMOTE", url: "https://jobs.example.com/1", postedAt: null, source: "Greenhouse",
+        workplaceType: "REMOTE", url: "https://jobs.example.com/1", postedAt: null, source: "Greenhouse", skills: ["Node.js"],
       }],
     },
     ...overrides,

@@ -8,6 +8,7 @@ import { clerkWebhookRouter } from "./auth/webhook.js";
 import type { Config } from "./config.js";
 import type { Db } from "./db/prisma.js";
 import { JobSearch, jobSearchRouter } from "./discovery/job-search.js";
+import { extractSkills, textOf } from "./discovery/skills.js";
 import { defaultJobSources, type JobSources } from "./discovery/sources.js";
 import { docsRouter } from "./docengine/docs-router.js";
 import { DocEngine } from "./docengine/engine.js";
@@ -125,7 +126,12 @@ export function createApp(deps: AppDependencies): App {
   api.use("/jobs", jobsRouter(jobs));
   api.use("/email-templates", templatesRouter(templates));
   api.use("/gmail", gmailRouter(gmail));
-  api.use("/discover", jobSearchRouter(jobSearch, now));
+  // A resume's skills for the Find jobs match: read from all of its text (form and document)
+  const resumeSkills = async (userId: string, resumeId: string) => {
+    const resume = await resumes.get(userId, resumeId);
+    return extractSkills(textOf([resume.data, resume.document]).join("\n"));
+  };
+  api.use("/discover", jobSearchRouter(jobSearch, resumeSkills, now));
   api.use("/docs", docsRouter(engine, userFields));
   api.use("/resumes", resumesRouter(resumes, resumeDocuments, drive, userFields));
   api.use("/drive", driveRouter(drive));

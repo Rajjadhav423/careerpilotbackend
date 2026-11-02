@@ -1,5 +1,6 @@
 import type { TechRole } from "./classify.js";
 import { cityName, countryName, type Place } from "./places.js";
+import { extractSkills } from "./skills.js";
 
 /*
  * Job sources for Find jobs: public company boards, free job feeds and (with an API key) aggregators. Only fixed
@@ -25,6 +26,8 @@ export type RawPosting = {
   places?: Place[];
   /** A hiring contact the company published in the post itself (e.g. Hacker News "Who is hiring?") */
   contactEmail?: string;
+  /** Known tech skills the post mentions (title, department and description), for the resume match */
+  skills: string[];
 };
 
 /** A tech posting as the API returns it. */
@@ -233,33 +236,43 @@ function workplace(value: unknown, remote?: boolean | null): WorkplaceType {
 
 const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
 
-/** Drops postings without a title or a safe link. */
-function posting(p: Omit<RawPosting, "url" | "title"> & { url: unknown; title: unknown }): RawPosting | null {
+/**
+ * Drops postings without a title or a safe link. The description (HTML or text) is only read for skills, not kept.
+ */
+function posting({ description, ...p }: Omit<RawPosting, "url" | "title" | "skills">
+  & { url: unknown; title: unknown; description?: string | null }): RawPosting | null {
   const url = safeUrl(p.url);
   const title = text(p.title);
-  return url && title ? { ...p, url, title: title.slice(0, 300), company: p.company.slice(0, 200) } : null;
+  if (!url || !title) return null;
+  const skills = extractSkills(`${title}\n${p.department ?? ""}\n${description ? htmlToText(description) : ""}`);
+  return { ...p, url, title: title.slice(0, 300), company: p.company.slice(0, 200), skills };
 }
 
 const notNull = <T,>(value: T | null): value is T => value !== null;
 
 // ---- company job boards ----
 
-type GreenhouseJob = { id: number; title: string; location?: { name?: string }; absolute_url: string; first_published?: string; updated_at?: string };
+type GreenhouseJob = { id: number; title: string; location?: { name?: string }; absolute_url: string; first_published?: string;
+  updated_at?: string; content?: string };
 
+/** With content=true (a few MB for big boards) so the match can read each job's requirements. */
 async function greenhouse(slug: string, company: string): Promise<RawPosting[]> {
-  const data = await getJson<{ jobs?: GreenhouseJob[] }>(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs`);
+  const data = await getJson<{ jobs?: GreenhouseJob[] }>(`https://boards-api.greenhouse.io/v1/boards/${slug}/jobs?content=true`);
   return (data.jobs ?? []).map((job) => {
     const location = text(job.location?.name);
+    // content is HTML with its tags escaped as entities: decoded once to HTML, then read as text
+    const description = job.content ? htmlToText(job.content) : null;
     return posting({
       id: `greenhouse-${slug}-${job.id}`, title: job.title, company, location, department: null,
       // The list endpoint has no workplace field; "Remote" usually appears in the location name.
       workplaceType: location?.toLowerCase().includes("remote") ? "REMOTE" : "UNSPECIFIED",
       url: job.absolute_url, postedAt: isoDate(job.first_published ?? job.updated_at), source: "Greenhouse",
+      contactEmail: emailIn(description), description,
     });
   }).filter(notNull);
 }
 
-type LeverJob = { id: string; text: string; categories?: { location?: string; team?: string; department?: string }; createdAt?: number; workplaceType?: string; hostedUrl: string };
+type LeverJob = { id: string; text: string; categories?: { location?: string; team?: string; department?: string }; createdAt?: number; workplaceType?: string; hostedUrl: string; descriptionPlain?: string; lists?: { text?: string; content?: string }[] };
 
 async function lever(slug: string, company: string): Promise<RawPosting[]> {
   const jobs = await getJson<LeverJob[]>(`https://api.lever.co/v0/postings/${slug}?mode=json`);
@@ -267,6 +280,8 @@ async function lever(slug: string, company: string): Promise<RawPosting[]> {
     id: `lever-${slug}-${job.id}`, title: job.text, company, location: text(job.categories?.location),
     department: text(job.categories?.team) ?? text(job.categories?.department), workplaceType: workplace(job.workplaceType),
     url: job.hostedUrl, postedAt: isoDate(job.createdAt), source: "Lever",
+    // Requirements are often only in the bullet lists
+    description: [job.descriptionPlain, ...(job.lists ?? []).map((l) => `${l.text ?? ""}\n${l.content ?? ""}`)].join("\n"),
   })).filter(notNull);
 }
 
@@ -389,7 +404,7 @@ async function hackerNews(): Promise<RawPosting[]> {
       department: firstLine.slice(0, 200),
       workplaceType: /remote/i.test(firstLine) ? "REMOTE" : /onsite|on-site/i.test(firstLine) ? "ONSITE" : /hybrid/i.test(firstLine) ? "HYBRID" : "UNSPECIFIED",
       url: `https://news.ycombinator.com/item?id=${comment.id}`, postedAt: isoDate(comment.created_at_i), source: "Hacker News",
-      contactEmail: findEmail(text) ?? undefined,
+      contactEmail: findEmail(text) ?? undefined, description: text,
     });
   }).filter(notNull);
 }
@@ -403,7 +418,7 @@ async function remoteOk(): Promise<RawPosting[]> {
   return (Array.isArray(data) ? data : []).filter((job) => job.id && job.position).map((job) => posting({
     id: `remoteok-${job.id}`, title: job.position, company: job.company ?? "Unknown",
     location: text(job.location) ?? "Remote", department: (job.tags ?? []).join(", ") || null, workplaceType: "REMOTE",
-    url: job.url, postedAt: isoDate(job.date ?? job.epoch), source: "Remote OK", contactEmail: emailIn(job.description),
+    url: job.url, postedAt: isoDate(job.date ?? job.epoch), source: "Remote OK", contactEmail: emailIn(job.description), description: job.description,
   })).filter(notNull);
 }
 
@@ -415,7 +430,7 @@ async function remotive(): Promise<RawPosting[]> {
   return (data.jobs ?? []).map((job) => posting({
     id: `remotive-${job.id}`, title: job.title, company: job.company_name ?? "Unknown",
     location: text(job.candidate_required_location), department: text(job.category), workplaceType: "REMOTE",
-    url: job.url, postedAt: isoDate(job.publication_date), source: "Remotive", contactEmail: emailIn(job.description),
+    url: job.url, postedAt: isoDate(job.publication_date), source: "Remotive", contactEmail: emailIn(job.description), description: job.description,
   })).filter(notNull);
 }
 
@@ -426,7 +441,7 @@ async function arbeitnow(): Promise<RawPosting[]> {
   return (data.data ?? []).map((job) => posting({
     id: `arbeitnow-${job.slug}`, title: job.title, company: job.company_name ?? "Unknown", location: text(job.location),
     department: (job.tags ?? []).join(", ") || null, workplaceType: job.remote ? "REMOTE" : "UNSPECIFIED",
-    url: job.url, postedAt: isoDate(job.created_at), source: "Arbeitnow", contactEmail: emailIn(job.description),
+    url: job.url, postedAt: isoDate(job.created_at), source: "Arbeitnow", contactEmail: emailIn(job.description), description: job.description,
   })).filter(notNull);
 }
 
@@ -443,7 +458,7 @@ async function theMuse(): Promise<RawPosting[]> {
       id: `themuse-${job.id}`, title: job.name, company: job.company?.name ?? "Unknown", location,
       department: (job.categories ?? []).map((c) => c.name).join(", ") || null,
       workplaceType: location?.toLowerCase().includes("remote") ? "REMOTE" : "UNSPECIFIED",
-      url: job.refs?.landing_page, postedAt: isoDate(job.publication_date), source: "The Muse", contactEmail: emailIn(job.contents),
+      url: job.refs?.landing_page, postedAt: isoDate(job.publication_date), source: "The Muse", contactEmail: emailIn(job.contents), description: job.contents,
     });
   }).filter(notNull);
 }
@@ -467,7 +482,7 @@ async function himalayas(): Promise<RawPosting[]> {
     location: (job.locationRestrictions ?? []).join(", ") || "Remote",
     // The main category only ("Developer"); the long tag list stays out of the cards
     department: (job.parentCategories ?? []).join(", ") || null,
-    workplaceType: "REMOTE", url: job.applicationLink ?? job.guid, postedAt: isoDate(job.pubDate), source: "Himalayas", contactEmail: emailIn(job.description),
+    workplaceType: "REMOTE", url: job.applicationLink ?? job.guid, postedAt: isoDate(job.pubDate), source: "Himalayas", contactEmail: emailIn(job.description), description: job.description,
   })).filter(notNull);
 }
 
@@ -480,7 +495,7 @@ async function jobicy(): Promise<RawPosting[]> {
     id: `jobicy-${job.id}`, title: job.jobTitle, company: job.companyName ?? "Unknown",
     // jobGeo is where applicants may live ("Anywhere", "India", "EMEA")
     location: text(job.jobGeo) ?? "Remote", department: (job.jobIndustry ?? []).join(", ") || null,
-    workplaceType: "REMOTE", url: job.url, postedAt: isoDate(job.pubDate), source: "Jobicy", contactEmail: emailIn(job.jobDescription),
+    workplaceType: "REMOTE", url: job.url, postedAt: isoDate(job.pubDate), source: "Jobicy", contactEmail: emailIn(job.jobDescription), description: job.jobDescription,
   })).filter(notNull);
 }
 
@@ -492,7 +507,7 @@ async function workingNomads(): Promise<RawPosting[]> {
   return (Array.isArray(jobs) ? jobs : []).filter((job) => job.category_name === "Development").map((job) => posting({
     id: `workingnomads-${job.url.replace(/\D+/g, "") || job.url}`, title: job.title, company: job.company_name ?? "Unknown",
     location: text(job.location) ?? "Remote", department: text(job.tags), workplaceType: "REMOTE",
-    url: job.url, postedAt: isoDate(job.pub_date), source: "Working Nomads", contactEmail: emailIn(job.description),
+    url: job.url, postedAt: isoDate(job.pub_date), source: "Working Nomads", contactEmail: emailIn(job.description), description: job.description,
   })).filter(notNull);
 }
 
@@ -518,7 +533,7 @@ async function weWorkRemotely(): Promise<RawPosting[]> {
       location: rssField(item, "region") || "Remote", department: rssField(item, "category") || null,
       workplaceType: "REMOTE", url, postedAt: isoDate(rssField(item, "pubDate")), source: "We Work Remotely",
       // The description is HTML escaped inside the RSS, so it's decoded twice
-      contactEmail: emailIn(htmlToText(rssField(item, "description"))),
+      contactEmail: emailIn(htmlToText(rssField(item, "description"))), description: htmlToText(rssField(item, "description")),
     });
   }).filter(notNull);
 }
