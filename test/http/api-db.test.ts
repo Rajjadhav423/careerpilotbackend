@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { SvixVerifier } from "../../src/auth/svix.js";
 import type { Db } from "../../src/db/prisma.js";
+import { GMAIL_COMPOSE_SCOPE } from "../../src/gmail/google-accounts.js";
 import { auth, buildApp, resetDb, TEST_DATABASE_URL, testConfig, testDb, validResume, type TestApp } from "../helpers.js";
 
 /*
@@ -196,6 +197,68 @@ describe.skipIf(!TEST_DATABASE_URL)("API with PostgreSQL", () => {
       const res = await api().post(`/api/v1/jobs/${job.body.id}/emails`).set(auth())
         .send({ to: "a@b.com, c@d.com", subject: "Hi", body: "x", confirmed: true });
       expect(res.body.errors).toMatchObject({ to: "must be a single valid email address" });
+    });
+  });
+
+  describe("scheduled emails", () => {
+    it("saves a Gmail draft, sends it when due and records the application", async () => {
+      let clock = new Date("2026-11-02T10:00:00Z");
+      t = buildApp(db, { now: () => clock });
+      t.google.token = { value: "google-token", scopes: new Set([...t.google.token!.scopes, GMAIL_COMPOSE_SCOPE]) };
+      const job = await createJob();
+      const email = { to: "hr@acme.com", subject: "Backend Engineer at Acme", body: "Hello", confirmed: true };
+      const runDue = () => request(t.app).post("/api/v1/internal/scheduled-emails/run").set("Authorization", `Bearer ${"s".repeat(32)}`);
+
+      const scheduled = await api().post(`/api/v1/jobs/${job.body.id}/emails/schedule`).set(auth())
+        .send({ ...email, sendAt: "2026-11-02T10:30:00Z" });
+      expect(scheduled.status).toBe(201);
+      expect(scheduled.body).toMatchObject({ status: "SCHEDULED", recipient: "hr@acme.com", job: { id: job.body.id } });
+      expect(t.gmail.drafts.size).toBe(1);
+      expect(t.gmail.sent).toHaveLength(0);
+
+      // Not due yet
+      expect((await runDue()).body).toEqual({ sent: 0, failed: 0, remaining: 0 });
+      // Another user can't see or touch it
+      expect((await api().delete(`/api/v1/scheduled-emails/${scheduled.body.id}`).set(auth("user_2"))).status).toBe(404);
+
+      clock = new Date("2026-11-02T10:31:00Z");
+      expect((await runDue()).body).toEqual({ sent: 1, failed: 0, remaining: 0 });
+      expect(t.gmail.sent).toHaveLength(1);
+      expect(t.gmail.drafts.size).toBe(0);
+      const list = await api().get("/api/v1/scheduled-emails").set(auth());
+      expect(list.body[0]).toMatchObject({ status: "SENT" });
+      expect((await api().get(`/api/v1/jobs/${job.body.id}`).set(auth())).body.status).toBe("APPLIED");
+      expect((await api().get(`/api/v1/jobs/${job.body.id}/emails`).set(auth())).body).toHaveLength(1);
+      // Sending again never resends
+      expect((await runDue()).body.sent).toBe(0);
+    });
+
+    it("reschedules, cancels (deleting the draft) and reports a draft deleted in Gmail", async () => {
+      const clock = new Date("2026-11-02T10:00:00Z");
+      t = buildApp(db, { now: () => clock });
+      t.google.token = { value: "google-token", scopes: new Set([...t.google.token!.scopes, GMAIL_COMPOSE_SCOPE]) };
+      const job = await createJob();
+      const email = { to: "hr@acme.com", subject: "Application", body: "Hello", confirmed: true, sendAt: "2026-11-03T09:00:00+05:30" };
+      const first = (await api().post(`/api/v1/jobs/${job.body.id}/emails/schedule`).set(auth()).send(email)).body;
+      const moved = await api().patch(`/api/v1/scheduled-emails/${first.id}`).set(auth()).send({ sendAt: "2026-11-04T09:00:00+05:30" });
+      expect(moved.body.sendAt).toBe("2026-11-04T03:30:00.000Z");
+      const cancelled = await api().delete(`/api/v1/scheduled-emails/${first.id}`).set(auth());
+      expect(cancelled.body.status).toBe("CANCELLED");
+      expect(t.gmail.drafts.size).toBe(0);
+      expect((await api().post(`/api/v1/scheduled-emails/${first.id}/send-now`).set(auth())).status).toBe(409);
+
+      const second = (await api().post(`/api/v1/jobs/${job.body.id}/emails/schedule`).set(auth()).send(email)).body;
+      t.gmail.drafts.clear(); // the user deleted the draft in Gmail
+      const now = await api().post(`/api/v1/scheduled-emails/${second.id}/send-now`).set(auth());
+      expect(now.body).toMatchObject({ status: "FAILED", error: "The draft was deleted in Gmail, so nothing was sent." });
+      expect(t.gmail.sent).toHaveLength(0);
+    });
+
+    it("needs the Gmail drafts permission", async () => {
+      const job = await createJob();
+      const res = await api().post(`/api/v1/jobs/${job.body.id}/emails/schedule`).set(auth())
+        .send({ to: "hr@acme.com", subject: "Application", body: "Hello", confirmed: true, sendAt: new Date(Date.now() + 3_600_000).toISOString() });
+      expect(res.body.code).toBe("GMAIL_SCHEDULE_PERMISSION_MISSING");
     });
   });
 

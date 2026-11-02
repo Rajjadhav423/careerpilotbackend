@@ -80,7 +80,7 @@ describe("Gmail", () => {
   it("reports status from the Google account", async () => {
     const google = new FakeGoogleAccounts();
     const gmail = new GmailService(google, new FakeGmail());
-    expect(await gmail.status(await user())).toEqual({ configured: true, connected: true, canSend: true, canTrack: false, googleEmail: "me@gmail.com" });
+    expect(await gmail.status(await user())).toEqual({ configured: true, connected: true, canSend: true, canTrack: false, canSchedule: false, googleEmail: "me@gmail.com" });
     google.account = null;
     expect(await gmail.status(await user())).toMatchObject({ connected: false, canSend: false });
     google.configured = false;

@@ -213,6 +213,36 @@ describe("resume rendering", () => {
   });
 });
 
+describe("scheduled emails without a database", () => {
+  const JOB = "22222222-2222-4222-8222-222222222222";
+  const run = "/api/v1/internal/scheduled-emails/run";
+
+  it("runs due emails only with the scheduler secret", async () => {
+    const { app: server } = app();
+    expect((await request(server).post(run)).status).toBe(401);
+    expect((await request(server).post(run).set("Authorization", "Bearer wrong")).status).toBe(401);
+    // A signed-in user's token isn't the scheduler secret
+    expect((await request(server).post(run).set(auth())).status).toBe(401);
+    const off = buildApp(noDb, { config: testConfig({ schedulerSecret: null }), userResolver: memoryUsers });
+    expect((await request(off.app).post(run).set("Authorization", `Bearer ${"s".repeat(32)}`)).status).toBe(404);
+  });
+
+  it("refuses send times in the past or over a year ahead", async () => {
+    const { app: server } = app();
+    const email = { to: "hr@acme.com", subject: "Application", body: "Hello", confirmed: true };
+    const past = await request(server).post(`/api/v1/jobs/${JOB}/emails/schedule`).set(auth())
+      .send({ ...email, sendAt: "2020-01-01T09:00:00Z" });
+    expect(past.status).toBe(400);
+    expect(past.body.detail).toMatch(/at least a minute/);
+    const far = await request(server).post(`/api/v1/jobs/${JOB}/emails/schedule`).set(auth())
+      .send({ ...email, sendAt: "2099-01-01T09:00:00Z" });
+    expect(far.body.detail).toMatch(/within the next year/);
+    const noZone = await request(server).post(`/api/v1/jobs/${JOB}/emails/schedule`).set(auth())
+      .send({ ...email, sendAt: "2026-12-01 09:00" });
+    expect(noZone.status).toBe(400);
+  });
+});
+
 describe("discovery, Gmail and templates without a database", () => {
   it("searches job boards", async () => {
     const { app: server } = app();
@@ -225,7 +255,7 @@ describe("discovery, Gmail and templates without a database", () => {
 
   it("reports Gmail status", async () => {
     const res = await request(app().app).get("/api/v1/gmail/status").set(auth());
-    expect(res.body).toEqual({ configured: true, connected: true, canSend: true, canTrack: false, googleEmail: "me@gmail.com" });
+    expect(res.body).toEqual({ configured: true, connected: true, canSend: true, canTrack: false, canSchedule: false, googleEmail: "me@gmail.com" });
   });
 
   it("lists merge fields and previews templates", async () => {

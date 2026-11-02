@@ -35,6 +35,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     resumeVersionsEnabled: false,
     pdf: { maxPages: 10, maxBytes: 5 * 1024 * 1024, renderTimeoutMs: 20_000, maxConcurrent: 2, maxQueued: 8 },
     mcpServiceSecret: null,
+    schedulerSecret: "s".repeat(32),
     trackingBaseUrl: null,
     ...overrides,
   };
@@ -103,6 +104,28 @@ export class FakeGmail implements GmailSender {
 
   async thread(_token: GoogleAccessToken, threadId: string): Promise<ThreadMessage[] | null> {
     return this.threads.get(threadId) ?? null;
+  }
+
+  /** Drafts by id (deleted and sent ones are removed) */
+  drafts = new Map<string, { message: string; threadId: string | null }>();
+  private nextDraft = 1;
+
+  async createDraft(_token: GoogleAccessToken, message: string, threadId?: string | null): Promise<{ draftId: string }> {
+    if (this.fail) throw this.fail;
+    const draftId = `draft-${this.nextDraft++}`;
+    this.drafts.set(draftId, { message, threadId: threadId ?? null });
+    return { draftId };
+  }
+
+  async sendDraft(token: GoogleAccessToken, draftId: string): Promise<SentMessage | null> {
+    const draft = this.drafts.get(draftId);
+    if (!draft) return null;
+    this.drafts.delete(draftId);
+    return this.send(token, draft.message, draft.threadId);
+  }
+
+  async deleteDraft(_token: GoogleAccessToken, draftId: string): Promise<void> {
+    this.drafts.delete(draftId);
   }
 }
 
@@ -221,7 +244,7 @@ export const noDb = new Proxy({}, {
 export async function testDb(): Promise<Db> {
   const db = createDb(TEST_DATABASE_URL!);
   // Each migration with a table it creates: applied when that table is missing
-  const migrations: [string, string][] = [["0_init", "users"], ["1_user_fields", "user_fields"]];
+  const migrations: [string, string][] = [["0_init", "users"], ["1_user_fields", "user_fields"], ["4_scheduled_emails", "scheduled_emails"]];
   for (const [name, table] of migrations) {
     const [{ exists }] = await db.$queryRawUnsafe<{ exists: boolean }[]>(
       `select to_regclass('public.${table}') is not null as exists`);

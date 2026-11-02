@@ -6,6 +6,8 @@ import { ApiError } from "../http/errors.js";
  */
 
 export const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+/** Create, update and send drafts (it also allows sending): scheduled emails wait as drafts in the user's Gmail. */
+export const GMAIL_COMPOSE_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
 /** Read-only message headers (no bodies): lets CareerPilot see bounces and replies in a sent email's thread. */
 export const GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
 /** Google Drive limited to files CareerPilot creates (see drive/). */

@@ -35,6 +35,9 @@ const schema = z.object({
   TRACKING_BASE_URL: z.string().trim().url("TRACKING_BASE_URL must be a URL").startsWith("https://", "TRACKING_BASE_URL must use https")
     .optional().or(z.literal("").transform(() => undefined)),
   /** Shared with the MCP server only; when set, the API accepts its short-lived service tokens. At least 32 characters. */
+  /** Secret the scheduler pinger sends to run due scheduled emails; unset turns the run endpoint off. At least 32 characters. */
+  SCHEDULER_SECRET: z.string().trim().min(32, "SCHEDULER_SECRET must be at least 32 characters").optional()
+    .or(z.literal("").transform(() => undefined)),
   MCP_SERVICE_SECRET: z.string().trim().min(32, "MCP_SERVICE_SECRET must be at least 32 characters").optional()
     .or(z.literal("").transform(() => undefined)),
 });
@@ -62,6 +65,8 @@ export type Config = {
   };
   /** Secret for the MCP server's service tokens; null turns them off */
   mcpServiceSecret: string | null;
+  /** Bearer secret for /internal/scheduled-emails/run; null turns it off */
+  schedulerSecret: string | null;
   /** Public URL of this API for the open-tracking pixel; null turns open tracking off */
   trackingBaseUrl: string | null;
 };
@@ -96,6 +101,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       maxQueued: e.PDF_MAX_QUEUED,
     },
     mcpServiceSecret: e.MCP_SERVICE_SECRET ?? null,
+    schedulerSecret: e.SCHEDULER_SECRET ?? null,
     trackingBaseUrl: e.TRACKING_BASE_URL?.replace(/\/+$/, "") ?? null,
   };
 }

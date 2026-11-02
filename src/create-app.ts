@@ -4,6 +4,9 @@ import express, { Router, type Express } from "express";
 import { ApplicationEmailService, applicationEmailsRouter, sentEmailsRouter } from "./applications/application-emails.js";
 import { trackingPixelRouter } from "./applications/email-tracking.js";
 import { followUpsRouter } from "./applications/follow-ups.js";
+import {
+  scheduledEmailsRouter, ScheduledEmailService, scheduleEmailRouter, schedulerRunRouter,
+} from "./applications/scheduled-emails.js";
 import { currentUser, requireUser, type TokenVerifier } from "./auth/clerk.js";
 import { clerkWebhookRouter } from "./auth/webhook.js";
 import type { Config } from "./config.js";
@@ -84,6 +87,7 @@ export function createApp(deps: AppDependencies): App {
   const applicationEmails = new ApplicationEmailService(
     db, jobs, templates, gmail, now, resumePdf, drivePdf, config.trackingBaseUrl,
   );
+  const scheduledEmails = new ScheduledEmailService(db, applicationEmails, gmail, now);
 
   const app = express();
   app.disable("x-powered-by");
@@ -114,6 +118,9 @@ export function createApp(deps: AppDependencies): App {
   // Open-tracking pixel: loaded by the recipient's mail client, so no sign-in
   api.use("/t", trackingPixelRouter(db, now));
 
+  // Sends due scheduled emails: called by an outside pinger with SCHEDULER_SECRET, not by a signed-in user
+  api.use("/internal/scheduled-emails/run", schedulerRunRouter(scheduledEmails, config.schedulerSecret));
+
   // Everything below: JSON bodies up to MAX_REQUEST_BYTES (413 REQUEST_TOO_LARGE above), signed-in users only
   api.use(express.json({ limit: config.maxRequestBytes, type: ["application/json", "application/*+json"] }));
   api.use(requireUser(deps.verifyToken, deps.userResolver ?? users));
@@ -122,7 +129,9 @@ export function createApp(deps: AppDependencies): App {
     res.json(toMeResponse(currentUser(res)));
   });
   api.use("/me/fields", userFieldsRouter(userFields));
+  api.use("/jobs/:jobId/emails/schedule", scheduleEmailRouter(scheduledEmails));
   api.use("/jobs/:jobId/emails", applicationEmailsRouter(applicationEmails));
+  api.use("/scheduled-emails", scheduledEmailsRouter(scheduledEmails));
   api.use("/emails", sentEmailsRouter(applicationEmails));
   api.use("/follow-ups", followUpsRouter(applicationEmails));
   api.use("/jobs", jobsRouter(jobs));

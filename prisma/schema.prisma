@@ -29,14 +29,15 @@ model User {
   createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  jobs           Job[]
-  emailTemplates EmailTemplate[]
-  sentEmails     SentEmail[]
-  resumes        Resume[]
-  resumeVersions ResumeVersion[]
-  driveSettings  DriveSettings?
-  driveDocuments DriveDocument[]
-  fields         UserField[]
+  jobs            Job[]
+  emailTemplates  EmailTemplate[]
+  sentEmails      SentEmail[]
+  scheduledEmails ScheduledEmail[]
+  resumes         Resume[]
+  resumeVersions  ResumeVersion[]
+  driveSettings   DriveSettings?
+  driveDocuments  DriveDocument[]
+  fields          UserField[]
 
   @@index([email], map: "users_email_idx")
   @@map("users")
@@ -64,8 +65,9 @@ model Job {
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  sentEmails SentEmail[]
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentEmails      SentEmail[]
+  scheduledEmails ScheduledEmail[]
 
   @@map("jobs")
 }
@@ -89,15 +91,15 @@ model EmailTemplate {
 
 /// Application emails Gmail accepted (the body is not stored), with delivery, open and reply tracking
 model SentEmail {
-  id             String   @id @default(uuid()) @db.Uuid
-  userId         String   @map("user_id") @db.Uuid
-  jobId          String?  @map("job_id") @db.Uuid
-  templateId     String?  @map("template_id") @db.Uuid
-  recipient      String   @db.VarChar(320)
-  subject        String   @db.VarChar(255)
-  gmailMessageId String   @map("gmail_message_id") @db.VarChar(128)
-  gmailThreadId  String?  @map("gmail_thread_id") @db.VarChar(128)
-  sentAt         DateTime @map("sent_at") @db.Timestamptz(6)
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @map("user_id") @db.Uuid
+  jobId          String?   @map("job_id") @db.Uuid
+  templateId     String?   @map("template_id") @db.Uuid
+  recipient      String    @db.VarChar(320)
+  subject        String    @db.VarChar(255)
+  gmailMessageId String    @map("gmail_message_id") @db.VarChar(128)
+  gmailThreadId  String?   @map("gmail_thread_id") @db.VarChar(128)
+  sentAt         DateTime  @map("sent_at") @db.Timestamptz(6)
   /// SENT (just accepted), DELIVERED (no bounce came back) or BOUNCED
   deliveryStatus String    @default("SENT") @map("delivery_status") @db.VarChar(16)
   bouncedAt      DateTime? @map("bounced_at") @db.Timestamptz(6)
@@ -117,6 +119,36 @@ model SentEmail {
 
   @@index([userId, jobId, sentAt(sort: Desc)], map: "sent_emails_user_job_idx")
   @@map("sent_emails")
+}
+
+/// An application email waiting as a draft in the user's Gmail until sendAt (see applications/scheduled-emails.ts)
+model ScheduledEmail {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  jobId         String   @map("job_id") @db.Uuid
+  templateId    String?  @map("template_id") @db.Uuid
+  recipient     String   @db.VarChar(320)
+  subject       String   @db.VarChar(255)
+  /// The draft in the user's Gmail that is sent at sendAt
+  gmailDraftId  String   @map("gmail_draft_id") @db.VarChar(128)
+  sendAt        DateTime @map("send_at") @db.Timestamptz(6)
+  /// SCHEDULED, SENDING, SENT, FAILED or CANCELLED
+  status        String   @default("SCHEDULED") @db.VarChar(16)
+  /// Why sending failed (shown to the user)
+  error         String?  @db.VarChar(500)
+  /// Open-tracking token already in the draft's pixel; moves to the sent email
+  trackingToken String?  @map("tracking_token") @db.VarChar(64)
+  /// The sent_emails row once sent
+  sentEmailId   String?  @map("sent_email_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([status, sendAt], map: "scheduled_emails_due_idx")
+  @@index([userId, sendAt], map: "scheduled_emails_user_idx")
+  @@map("scheduled_emails")
 }
 
 /// Form content (data) and, optionally, a docEngine document that is what gets rendered

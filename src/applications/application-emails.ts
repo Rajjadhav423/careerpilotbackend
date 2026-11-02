@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { currentUser } from "../auth/clerk.js";
 import type { Db } from "../db/prisma.js";
-import type { GmailService } from "../gmail/gmail.js";
+import type { GmailService, SentMessage } from "../gmail/gmail.js";
 import type { MimeAttachment } from "../gmail/mime.js";
 import { ApiError } from "../http/errors.js";
 import { body, uuidParam } from "../http/validate.js";
@@ -56,6 +56,21 @@ export const sendSchema = z.object({
 });
 
 export type SendRequest = z.infer<typeof sendSchema>;
+
+/** An email checked and ready for Gmail (see ApplicationEmailService.prepare). */
+export type PreparedEmail = {
+  jobId: string;
+  templateId: string | null;
+  to: string;
+  subject: string;
+  body: string;
+  attachment?: MimeAttachment;
+  /** A follow-up: the email whose Gmail thread it goes into */
+  replyTo?: { gmailMessageId: string; gmailThreadId: string | null };
+  trackingToken: string | null;
+  /** Open-tracking image URL, when tracking is on */
+  pixel?: string;
+};
 
 /** A saved resume as a PDF attachment. */
 export type ResumePdf = (user: User, resumeId: string) => Promise<MimeAttachment>;
@@ -196,6 +211,17 @@ export class ApplicationEmailService {
   }
 
   async send(user: User, jobId: string, request: SendRequest): Promise<SendResponse> {
+    const email = await this.prepare(user, jobId, request);
+    // Talks to Gmail outside any database transaction; nothing is recorded unless Gmail accepts the message
+    const sent = await this.gmail.send(user, email.to, email.subject, email.body, email.attachment, email.pixel, email.replyTo);
+    return this.record(user.id, email, sent, this.now());
+  }
+
+  /**
+   * Everything checked and built before an email goes to Gmail, now or as a scheduled draft: the user confirmed it,
+   * owns the job (and template and follow-up), no placeholders are left, and the attachment is rendered.
+   */
+  async prepare(user: User, jobId: string, request: SendRequest): Promise<PreparedEmail> {
     if (!request.confirmed) {
       throw new ApiError(400, "CONFIRMATION_REQUIRED", "Review the email and confirm before sending.");
     }
@@ -208,7 +234,6 @@ export class ApplicationEmailService {
         `Replace these placeholders before sending: ${unresolved.join(", ")}`);
     }
 
-    // Talks to Gmail outside any database transaction; nothing is recorded unless Gmail accepts the message
     const to = request.to.trim();
     const subject = request.subject.trim();
     // Rendered on the server from the user's own saved resume: nothing uploaded from the browser is attached
@@ -224,15 +249,22 @@ export class ApplicationEmailService {
     if (replyTo === null) throw new ApiError(404, "EMAIL_NOT_FOUND", "The email you're following up on wasn't found.");
     const trackingToken = this.trackingBaseUrl ? newTrackingToken() : null;
     const pixel = trackingToken ? pixelUrl(this.trackingBaseUrl!, trackingToken) : undefined;
-    const sent = await this.gmail.send(user, to, subject, request.body, attachment, pixel, replyTo);
-    const sentAt = this.now();
+    return { jobId: job.id, templateId, to, subject, body: request.body, attachment, replyTo: replyTo ?? undefined, trackingToken, pixel };
+  }
 
+  /** Saves an email Gmail accepted and marks its job Applied, in one transaction. */
+  async record(
+    userId: string,
+    email: Pick<PreparedEmail, "jobId" | "templateId" | "to" | "subject" | "trackingToken">,
+    sent: SentMessage,
+    sentAt: Date,
+  ): Promise<SendResponse> {
     return this.db.$transaction(async (tx) => {
       const record = await tx.sentEmail.create({ data: {
-        userId: user.id, jobId: job.id, templateId, recipient: to, subject,
-        gmailMessageId: sent.messageId, gmailThreadId: sent.threadId, sentAt, trackingToken,
+        userId, jobId: email.jobId, templateId: email.templateId, recipient: email.to, subject: email.subject,
+        gmailMessageId: sent.messageId, gmailThreadId: sent.threadId, sentAt, trackingToken: email.trackingToken,
       } });
-      const updated = await this.jobs.recordApplicationSent(user.id, job.id, sentAt, tx);
+      const updated = await this.jobs.recordApplicationSent(userId, email.jobId, sentAt, tx);
       return { id: record.id, sentAt, jobStatus: updated.status, appliedAt: updated.appliedAt };
     });
   }
