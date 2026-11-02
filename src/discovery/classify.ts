@@ -21,7 +21,7 @@ const EXCLUDED = words(
   "(technical )?program manager", "product manag(er|ement)", "project manager",
   "physical security", "security officer", "mechanical", "electrical", "hardware", "civil", "manufacturing",
   "facilit(y|ies)",
-  "technician",
+  "technician", "translator", "nurse", "driver", "teacher",
 );
 
 const RULES: { role: TechRole; pattern: RegExp }[] = [

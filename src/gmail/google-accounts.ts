@@ -6,6 +6,8 @@ import { ApiError } from "../http/errors.js";
  */
 
 export const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
+/** Read-only message headers (no bodies): lets CareerPilot see bounces and replies in a sent email's thread. */
+export const GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
 /** Google Drive limited to files CareerPilot creates (see drive/). */
 export const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 

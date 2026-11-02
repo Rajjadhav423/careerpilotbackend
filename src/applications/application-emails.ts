@@ -11,6 +11,10 @@ import type { Job, JobService, JobStatus } from "../jobs/jobs.js";
 import { MERGE_FIELDS, placeholder, remainingPlaceholders, resolve } from "../templates/merge-fields.js";
 import type { TemplateService } from "../templates/templates.js";
 import type { User } from "../users/users.js";
+import {
+  newTrackingToken, pixelUrl, readThread, RECHECK_AFTER_MS, TRACK_FOR_MS, trackingStatus,
+  type DeliveryStatus, type TrackingStatus,
+} from "./email-tracking.js";
 
 /*
  * Application emails for one of the user's jobs: compose from a template, then send through the user's Gmail after
@@ -45,6 +49,8 @@ export const sendSchema = z.object({
   resumeId: uuid.nullish(),
   /** One of the user's CareerPilot PDFs in Google Drive, attached as is (e.g. the resume linked in the email) */
   driveDocumentId: uuid.nullish(),
+  /** A follow-up: one of this job's sent emails; the new email goes into its Gmail thread */
+  replyToId: uuid.nullish(),
   confirmed: z.boolean().nullish(),
 });
 
@@ -73,7 +79,50 @@ export type SentEmailResponse = {
   subject: string;
   templateId: string | null;
   sentAt: Date;
+  /** The headline status: REPLIED, BOUNCED, OPENED, DELIVERED or SENT */
+  status: TrackingStatus;
+  deliveryStatus: DeliveryStatus;
+  bouncedAt: Date | null;
+  /** False when open tracking was off for this email (so "not opened" means nothing) */
+  openTracked: boolean;
+  openCount: number;
+  firstOpenedAt: Date | null;
+  lastOpenedAt: Date | null;
+  replyCount: number;
+  repliedAt: Date | null;
+  /** Last time the Gmail thread was checked for bounces and replies; null = never (no permission yet) */
+  checkedAt: Date | null;
 };
+
+/** A sent email with the job it was for (the list across all jobs). */
+export type SentEmailWithJob = SentEmailResponse & { job: { id: string; title: string; company: string } | null };
+
+const TRACKED_FIELDS = {
+  id: true, recipient: true, subject: true, templateId: true, sentAt: true, gmailMessageId: true, gmailThreadId: true,
+  deliveryStatus: true, bouncedAt: true, trackingToken: true, openCount: true, firstOpenedAt: true, lastOpenedAt: true,
+  replyCount: true, repliedAt: true, checkedAt: true,
+} as const;
+
+type TrackedRow = {
+  id: string; recipient: string; subject: string; templateId: string | null; sentAt: Date;
+  gmailMessageId: string; gmailThreadId: string | null; deliveryStatus: string; bouncedAt: Date | null;
+  trackingToken: string | null; openCount: number; firstOpenedAt: Date | null; lastOpenedAt: Date | null;
+  replyCount: number; repliedAt: Date | null; checkedAt: Date | null;
+};
+
+/** Gmail threads checked per request at most, so a long list can't make the request slow. */
+const MAX_CHECKS_PER_REQUEST = 10;
+
+function toResponse(row: TrackedRow): SentEmailResponse {
+  return {
+    id: row.id, recipient: row.recipient, subject: row.subject, templateId: row.templateId, sentAt: row.sentAt,
+    status: trackingStatus(row),
+    deliveryStatus: row.deliveryStatus as DeliveryStatus, bouncedAt: row.bouncedAt,
+    openTracked: row.trackingToken !== null, openCount: row.openCount,
+    firstOpenedAt: row.firstOpenedAt, lastOpenedAt: row.lastOpenedAt,
+    replyCount: row.replyCount, repliedAt: row.repliedAt, checkedAt: row.checkedAt,
+  };
+}
 
 /** "11 October 2026" in the given IANA zone; unknown or blank zones fall back to UTC. */
 export function formatApplicationDate(date: Date, timeZone: string | null | undefined): string {
@@ -113,6 +162,8 @@ export class ApplicationEmailService {
     private readonly resumePdf?: ResumePdf,
     /** Downloads one of the user's CareerPilot PDFs from Drive; throws 404 for anyone else's */
     private readonly drivePdf?: ResumePdf,
+    /** Public URL of this API; when set, sent emails carry an open-tracking pixel */
+    private readonly trackingBaseUrl: string | null = null,
   ) {}
 
   async compose(user: User, jobId: string, templateId: string | null | undefined, timeZone: string | null | undefined)
@@ -163,13 +214,22 @@ export class ApplicationEmailService {
     const attachment = request.driveDocumentId
       ? await this.attachment(user, request.driveDocumentId, this.drivePdf)
       : request.resumeId ? await this.attachment(user, request.resumeId, this.resumePdf) : undefined;
-    const sent = await this.gmail.send(user, to, subject, request.body, attachment);
+    const replyTo = request.replyToId
+      ? await this.db.sentEmail.findFirst({
+        where: { id: request.replyToId, userId: user.id, jobId: job.id },
+        select: { gmailMessageId: true, gmailThreadId: true },
+      })
+      : undefined;
+    if (replyTo === null) throw new ApiError(404, "EMAIL_NOT_FOUND", "The email you're following up on wasn't found.");
+    const trackingToken = this.trackingBaseUrl ? newTrackingToken() : null;
+    const pixel = trackingToken ? pixelUrl(this.trackingBaseUrl!, trackingToken) : undefined;
+    const sent = await this.gmail.send(user, to, subject, request.body, attachment, pixel, replyTo);
     const sentAt = this.now();
 
     return this.db.$transaction(async (tx) => {
       const record = await tx.sentEmail.create({ data: {
         userId: user.id, jobId: job.id, templateId, recipient: to, subject,
-        gmailMessageId: sent.messageId, gmailThreadId: sent.threadId, sentAt,
+        gmailMessageId: sent.messageId, gmailThreadId: sent.threadId, sentAt, trackingToken,
       } });
       const updated = await this.jobs.recordApplicationSent(user.id, job.id, sentAt, tx);
       return { id: record.id, sentAt, jobStatus: updated.status, appliedAt: updated.appliedAt };
@@ -185,14 +245,66 @@ export class ApplicationEmailService {
     return pdf;
   }
 
-  /** Emails Gmail accepted for this job, newest first. */
+  /** Emails Gmail accepted for this job, newest first, with up-to-date tracking. */
   async history(user: User, jobId: string): Promise<SentEmailResponse[]> {
     const job = await this.jobs.get(user.id, jobId);
-    return this.db.sentEmail.findMany({
+    const rows = await this.db.sentEmail.findMany({
       where: { userId: user.id, jobId: job.id },
       orderBy: { sentAt: "desc" },
-      select: { id: true, recipient: true, subject: true, templateId: true, sentAt: true },
+      select: TRACKED_FIELDS,
     });
+    return (await this.refresh(user, rows)).map(toResponse);
+  }
+
+  /** All of the user's sent emails, newest first, with the job each was for. */
+  async list(user: User, limit = 100): Promise<SentEmailWithJob[]> {
+    const rows = await this.db.sentEmail.findMany({
+      where: { userId: user.id },
+      orderBy: { sentAt: "desc" },
+      take: limit,
+      select: { ...TRACKED_FIELDS, job: { select: { id: true, title: true, company: true } } },
+    });
+    const refreshed = await this.refresh(user, rows);
+    return refreshed.map((row) => ({ ...toResponse(row), job: row.job }));
+  }
+
+  /** Tracking for a few of the user's emails only (the rows a page still watches); unknown ids are left out. */
+  async statuses(user: User, ids: string[]): Promise<SentEmailResponse[]> {
+    const rows = await this.db.sentEmail.findMany({
+      where: { userId: user.id, id: { in: ids } },
+      orderBy: { sentAt: "desc" },
+      select: TRACKED_FIELDS,
+    });
+    return (await this.refresh(user, rows)).map(toResponse);
+  }
+
+  /**
+   * Reads the Gmail thread of emails not checked recently (newest first, a few per request) for bounces and replies.
+   * Best effort: without the gmail.metadata permission, or when Gmail is down, the stored status is returned as is.
+   */
+  private async refresh<T extends TrackedRow>(user: User, rows: T[]): Promise<T[]> {
+    const now = this.now();
+    const due = rows.filter((row) => row.gmailThreadId
+      && row.deliveryStatus !== "BOUNCED"
+      && now.getTime() - row.sentAt.getTime() < TRACK_FOR_MS
+      && (!row.checkedAt || now.getTime() - row.checkedAt.getTime() >= RECHECK_AFTER_MS))
+      .slice(0, MAX_CHECKS_PER_REQUEST);
+    if (due.length === 0) return rows;
+
+    const updated = new Map<string, T>();
+    await Promise.all(due.map(async (row) => {
+      try {
+        const messages = await this.gmail.threadMessages(user, row.gmailThreadId!);
+        if (messages === null) return;
+        const findings = readThread(messages, row, now);
+        await this.db.sentEmail.update({ where: { id: row.id }, data: { ...findings, checkedAt: now } });
+        updated.set(row.id, { ...row, ...findings, checkedAt: now });
+      } catch (error) {
+        // Name only: the stored tracking is still correct, just not refreshed
+        console.warn(`Couldn't refresh email tracking: ${(error as Error).name}`);
+      }
+    }));
+    return rows.map((row) => updated.get(row.id) ?? row);
   }
 }
 
@@ -219,5 +331,21 @@ export function applicationEmailsRouter(service: ApplicationEmailService): Route
     res.json(await service.history(currentUser(res), uuidParam(req, "jobId", jobNotFound())));
   });
 
+  return router;
+}
+
+/** Mounted at /api/v1/emails: every application email the user sent, with tracking. */
+export function sentEmailsRouter(service: ApplicationEmailService): Router {
+  const router = Router();
+  /** ?ids=a,b,c (up to 20): fresh tracking for just those rows, so a page can poll without reloading the list. */
+  router.get("/status", async (req, res) => {
+    const raw = typeof req.query.ids === "string" ? req.query.ids : "";
+    const ids = z.array(uuid).min(1).max(20).safeParse(raw.split(",").map((id) => id.trim()).filter(Boolean));
+    if (!ids.success) throw new ApiError(400, "VALIDATION_FAILED", "ids must be 1 to 20 email ids, comma-separated");
+    res.json(await service.statuses(currentUser(res), [...new Set(ids.data)]));
+  });
+  router.get("/", async (_req, res) => {
+    res.json(await service.list(currentUser(res)));
+  });
   return router;
 }

@@ -10,10 +10,11 @@ const app = (overrides: Parameters<typeof buildApp>[1] = {}) =>
   buildApp(noDb, {
     userResolver: memoryUsers,
     userFields: memoryUserFields({ github: "https://github.com/priya" }),
-    boardFetchers: {
-      GREENHOUSE: async () => [{
+    jobSources: {
+      list: () => [{ key: "greenhouse:acme", provider: "Greenhouse", board: "greenhouse:acme", company: "Acme", kind: "company" }],
+      load: async () => [{
         id: "greenhouse-acme-1", title: "Backend Engineer", company: "Acme", location: "Remote", department: null,
-        workplaceType: "REMOTE", url: "https://jobs.example.com/1", postedAt: null, source: "Greenhouse", techRole: null,
+        workplaceType: "REMOTE", url: "https://jobs.example.com/1", postedAt: null, source: "Greenhouse",
       }],
     },
     ...overrides,
@@ -224,7 +225,7 @@ describe("discovery, Gmail and templates without a database", () => {
 
   it("reports Gmail status", async () => {
     const res = await request(app().app).get("/api/v1/gmail/status").set(auth());
-    expect(res.body).toEqual({ configured: true, connected: true, canSend: true, googleEmail: "me@gmail.com" });
+    expect(res.body).toEqual({ configured: true, connected: true, canSend: true, canTrack: false, googleEmail: "me@gmail.com" });
   });
 
   it("lists merge fields and previews templates", async () => {

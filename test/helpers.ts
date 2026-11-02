@@ -8,7 +8,7 @@ import { createDb, type Db } from "../src/db/prisma.js";
 import type { Doc } from "../src/docengine/model.js";
 import type { PdfRenderer, RenderedPdf } from "../src/docengine/pdf.js";
 import { DriveApiError, type DriveClient, type DriveFile } from "../src/drive/google-drive.js";
-import type { GmailSender, SentMessage } from "../src/gmail/gmail.js";
+import type { GmailSender, SentMessage, ThreadMessage } from "../src/gmail/gmail.js";
 import {
   DRIVE_FILE_SCOPE, GMAIL_SEND_SCOPE, type GoogleAccessToken, type GoogleAccount, type GoogleAccounts,
 } from "../src/gmail/google-accounts.js";
@@ -34,8 +34,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     maxRequestBytes: 512 * 1024,
     resumeVersionsEnabled: false,
     pdf: { maxPages: 10, maxBytes: 5 * 1024 * 1024, renderTimeoutMs: 20_000, maxConcurrent: 2, maxQueued: 8 },
-    discoveryBoards: ["greenhouse:acme:Acme"],
     mcpServiceSecret: null,
+    trackingBaseUrl: null,
     ...overrides,
   };
 }
@@ -85,13 +85,24 @@ export class FakeGoogleAccounts implements GoogleAccounts {
 }
 
 export class FakeGmail implements GmailSender {
-  sent: { message: string }[] = [];
+  sent: { message: string; threadId: string | null }[] = [];
   fail: Error | null = null;
 
-  async send(_token: GoogleAccessToken, message: string): Promise<SentMessage> {
+  async send(_token: GoogleAccessToken, message: string, threadId?: string | null): Promise<SentMessage> {
     if (this.fail) throw this.fail;
-    this.sent.push({ message });
-    return { messageId: `msg-${this.sent.length}`, threadId: "thread-1" };
+    this.sent.push({ message, threadId: threadId ?? null });
+    return { messageId: `msg-${this.sent.length}`, threadId: threadId ?? "thread-1" };
+  }
+
+  async messageIdHeader(_token: GoogleAccessToken, messageId: string): Promise<string | null> {
+    return `<${messageId}@mail.gmail.com>`;
+  }
+
+  /** Thread contents by thread id; a missing thread reads as deleted */
+  threads = new Map<string, ThreadMessage[]>();
+
+  async thread(_token: GoogleAccessToken, threadId: string): Promise<ThreadMessage[] | null> {
+    return this.threads.get(threadId) ?? null;
   }
 }
 
@@ -190,7 +201,7 @@ export function buildApp(db: Db, overrides: Partial<AppDependencies> = {}): Test
     gmailSender: gmail,
     driveClient: drive,
     pdf,
-    boardFetchers: { GREENHOUSE: async () => [] },
+    jobSources: { list: () => [], load: async () => [] },
     ...overrides,
   });
   return { ...app, google, gmail, drive, pdf };

@@ -13,13 +13,28 @@ const CRLF = "\r\n";
 /** A PDF attached to the email, e.g. a resume rendered by CareerPilot. */
 export type MimeAttachment = { fileName: string; content: Uint8Array };
 
-export function buildMimeMessage(to: string, subject: string, textBody: string, attachment?: MimeAttachment): string {
+/**
+ * Options:
+ * - trackingPixelUrl: an https URL of a 1x1 image added to the end of the HTML part only (open tracking).
+ * - inReplyTo: the Message-ID ("<...>") of the email this one follows up, so mail apps show them as one conversation.
+ */
+export type MimeOptions = { trackingPixelUrl?: string; inReplyTo?: string | null };
+
+/** An RFC 5322 Message-ID such as <abc@mail.gmail.com>: no spaces, line breaks or extra angle brackets. */
+const MESSAGE_ID = /^<[^<>\s]{1,995}>$/;
+
+export function buildMimeMessage(
+  to: string, subject: string, textBody: string, attachment?: MimeAttachment, options: MimeOptions = {},
+): string {
+  const { trackingPixelUrl, inReplyTo } = options;
   requireSingleLine("recipient", to);
   requireSingleLine("subject", subject);
+  if (inReplyTo && !MESSAGE_ID.test(inReplyTo)) throw new Error("inReplyTo must be a single Message-ID");
   const boundary = `careerpilot_${randomUUID().replaceAll("-", "")}`;
   const text = normaliseLineBreaks(textBody);
-  const alternative = part(boundary, "text/plain", text) + part(boundary, "text/html", toHtml(text)) + `--${boundary}--${CRLF}`;
-  const headers = `To: ${to}${CRLF}Subject: ${encodeHeader(subject)}${CRLF}MIME-Version: 1.0${CRLF}`;
+  const alternative = part(boundary, "text/plain", text) + part(boundary, "text/html", toHtml(text, trackingPixelUrl)) + `--${boundary}--${CRLF}`;
+  const threading = inReplyTo ? `In-Reply-To: ${inReplyTo}${CRLF}References: ${inReplyTo}${CRLF}` : "";
+  const headers = `To: ${to}${CRLF}Subject: ${encodeHeader(subject)}${CRLF}${threading}MIME-Version: 1.0${CRLF}`;
   if (!attachment) return `${headers}Content-Type: multipart/alternative; boundary="${boundary}"${CRLF}${CRLF}${alternative}`;
 
   // multipart/mixed: the text and HTML versions, then the PDF
@@ -71,10 +86,13 @@ export function encodeHeader(value: string): string {
 
 const encodedWord = (text: string) => `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
 
-function toHtml(text: string) {
+function toHtml(text: string, trackingPixelUrl?: string) {
   const escaped = escapeHtml(text).replaceAll(CRLF, `<br>${CRLF}`);
+  const pixel = trackingPixelUrl
+    ? `<img src="${escapeHtml(trackingPixelUrl)}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px">`
+    : "";
   return '<!doctype html><html><body><div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;'
-    + `line-height:1.5">${escaped}</div></body></html>`;
+    + `line-height:1.5">${escaped}</div>${pixel}</body></html>`;
 }
 
 function part(boundary: string, contentType: string, content: string) {

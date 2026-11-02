@@ -3,8 +3,8 @@ import { Router } from "express";
 import { currentUser } from "../auth/clerk.js";
 import { ApiError } from "../http/errors.js";
 import type { User } from "../users/users.js";
-import { GMAIL_SEND_SCOPE, type GoogleAccessToken, type GoogleAccounts } from "./google-accounts.js";
-import { buildMimeMessage, type MimeAttachment } from "./mime.js";
+import { GMAIL_METADATA_SCOPE, GMAIL_SEND_SCOPE, type GoogleAccessToken, type GoogleAccounts } from "./google-accounts.js";
+import { buildMimeMessage, type MimeAttachment, type MimeOptions } from "./mime.js";
 
 /*
  * Gmail for the signed-in user only: the Clerk user id always comes from their verified session token, so nobody
@@ -18,6 +18,8 @@ export type GmailStatus = {
   connected: boolean;
   /** That Google account granted the gmail.send permission */
   canSend: boolean;
+  /** That Google account granted gmail.metadata, so bounces and replies can be tracked */
+  canTrack: boolean;
   /** The Gmail address emails will be sent from (no token data) */
   googleEmail: string | null;
 };
@@ -25,9 +27,29 @@ export type GmailStatus = {
 /** Gmail's confirmation that it accepted the message. */
 export type SentMessage = { messageId: string; threadId: string | null };
 
+/** One message in a Gmail thread, headers only. */
+export type ThreadMessage = {
+  id: string;
+  /** The From header as written, e.g. "Jane <jane@acme.com>" */
+  from: string;
+  /** When Gmail received (or sent) it */
+  date: Date;
+  /** Gmail labels, e.g. SENT, INBOX */
+  labelIds: string[];
+};
+
 export interface GmailSender {
-  send(token: GoogleAccessToken, rfc5322Message: string): Promise<SentMessage>;
+  /** threadId: send into this existing Gmail thread (a follow-up) */
+  send(token: GoogleAccessToken, rfc5322Message: string, threadId?: string | null): Promise<SentMessage>;
+  /** The Message-ID header of one of the user's messages, or null when Gmail doesn't have it. */
+  messageIdHeader(token: GoogleAccessToken, messageId: string): Promise<string | null>;
+  /** The thread's messages (headers only), or null when Gmail no longer has the thread. */
+  thread(token: GoogleAccessToken, threadId: string): Promise<ThreadMessage[] | null>;
 }
+
+/** gmail.readonly includes everything gmail.metadata allows. */
+const TRACKING_SCOPES = [GMAIL_METADATA_SCOPE, "https://www.googleapis.com/auth/gmail.readonly"];
+const canTrack = (scopes: Set<string>) => TRACKING_SCOPES.some((scope) => scopes.has(scope));
 
 const gmailUnavailable = (detail = "Gmail is unavailable right now. Your email was not sent; please try again shortly.") =>
   new ApiError(502, "GMAIL_UNAVAILABLE", detail);
@@ -39,14 +61,14 @@ export class GmailApiClient implements GmailSender {
     private readonly baseUrl = "https://gmail.googleapis.com",
   ) {}
 
-  async send(token: GoogleAccessToken, rfc5322Message: string): Promise<SentMessage> {
+  async send(token: GoogleAccessToken, rfc5322Message: string, threadId?: string | null): Promise<SentMessage> {
     const raw = Buffer.from(rfc5322Message, "utf8").toString("base64url");
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/gmail/v1/users/me/messages/send`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token.value}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ raw }),
+        body: JSON.stringify(threadId ? { raw, threadId } : { raw }),
         signal: AbortSignal.timeout(20_000),
       });
     } catch (error) {
@@ -75,6 +97,53 @@ export class GmailApiClient implements GmailSender {
     }
     return { messageId: result.id, threadId: result.threadId ?? null };
   }
+
+  async messageIdHeader(token: GoogleAccessToken, messageId: string): Promise<string | null> {
+    const url = `${this.baseUrl}/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}`
+      + "?format=metadata&metadataHeaders=Message-ID&fields=payload/headers";
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, { headers: { Authorization: `Bearer ${token.value}` }, signal: AbortSignal.timeout(10_000) });
+    } catch (error) {
+      console.warn(`Gmail unreachable: ${(error as Error).name}`);
+      return null;
+    }
+    if (!response.ok) {
+      console.warn(`Gmail message read failed with status ${response.status}`);
+      return null;
+    }
+    const result = (await response.json().catch(() => null)) as { payload?: { headers?: { name?: string; value?: string }[] } } | null;
+    return result?.payload?.headers?.find((header) => header.name?.toLowerCase() === "message-id")?.value?.trim() || null;
+  }
+
+  async thread(token: GoogleAccessToken, threadId: string): Promise<ThreadMessage[] | null> {
+    const url = `${this.baseUrl}/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}`
+      + "?format=metadata&metadataHeaders=From&fields=messages(id,labelIds,internalDate,payload/headers)";
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        headers: { Authorization: `Bearer ${token.value}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (error) {
+      console.warn(`Gmail unreachable: ${(error as Error).name}`);
+      throw gmailUnavailable("Couldn't check Gmail right now. Please try again shortly.");
+    }
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      console.warn(`Gmail thread read failed with status ${response.status}`);
+      throw gmailUnavailable("Couldn't check Gmail right now. Please try again shortly.");
+    }
+    const result = (await response.json().catch(() => null)) as {
+      messages?: { id?: string; labelIds?: string[]; internalDate?: string; payload?: { headers?: { name?: string; value?: string }[] } }[];
+    } | null;
+    return (result?.messages ?? []).filter((message) => message.id).map((message) => ({
+      id: message.id!,
+      from: message.payload?.headers?.find((header) => header.name?.toLowerCase() === "from")?.value ?? "",
+      date: new Date(Number(message.internalDate ?? 0)),
+      labelIds: message.labelIds ?? [],
+    }));
+  }
 }
 
 export class GmailService {
@@ -84,15 +153,27 @@ export class GmailService {
   ) {}
 
   async status(user: User): Promise<GmailStatus> {
-    if (!this.accounts.configured) return { configured: false, connected: false, canSend: false, googleEmail: null };
+    if (!this.accounts.configured) {
+      return { configured: false, connected: false, canSend: false, canTrack: false, googleEmail: null };
+    }
     const account = await this.accounts.findGoogleAccount(user.clerkUserId);
     return account
-      ? { configured: true, connected: true, canSend: account.approvedScopes.has(GMAIL_SEND_SCOPE), googleEmail: account.email }
-      : { configured: true, connected: false, canSend: false, googleEmail: null };
+      ? {
+        configured: true, connected: true, canSend: account.approvedScopes.has(GMAIL_SEND_SCOPE),
+        canTrack: canTrack(account.approvedScopes), googleEmail: account.email,
+      }
+      : { configured: true, connected: false, canSend: false, canTrack: false, googleEmail: null };
   }
 
   /** Sends from the user's own Gmail. Returns only after Gmail confirms it accepted the message. */
-  async send(user: User, to: string, subject: string, body: string, attachment?: MimeAttachment): Promise<SentMessage> {
+  /**
+   * replyTo: a follow-up goes into the original's Gmail thread; with the gmail.metadata permission it also carries
+   * In-Reply-To, so the recipient's mail app shows it in the same conversation.
+   */
+  async send(
+    user: User, to: string, subject: string, body: string, attachment?: MimeAttachment, trackingPixelUrl?: string,
+    replyTo?: { gmailMessageId: string; gmailThreadId: string | null },
+  ): Promise<SentMessage> {
     if (!this.accounts.configured) {
       throw new ApiError(503, "GMAIL_NOT_CONFIGURED", "Gmail isn't set up on this server yet.");
     }
@@ -102,7 +183,20 @@ export class GmailService {
       throw new ApiError(409, "GMAIL_PERMISSION_MISSING",
         "Your Google connection doesn't allow sending email yet. Reconnect Gmail and allow sending.");
     }
-    return this.gmail.send(token, buildMimeMessage(to, subject, body, attachment));
+    const inReplyTo = replyTo && canTrack(token.scopes) ? await this.gmail.messageIdHeader(token, replyTo.gmailMessageId) : null;
+    const options: MimeOptions = { trackingPixelUrl, inReplyTo };
+    return this.gmail.send(token, buildMimeMessage(to, subject, body, attachment, options), replyTo?.gmailThreadId);
+  }
+
+  /**
+   * The headers of a sent email's thread, or null when tracking isn't possible (no Google connection, no
+   * gmail.metadata permission, or the thread was deleted). Never throws for a missing permission.
+   */
+  async threadMessages(user: User, threadId: string): Promise<ThreadMessage[] | null> {
+    if (!this.accounts.configured) return null;
+    const token = await this.accounts.findAccessToken(user.clerkUserId);
+    if (!token || !canTrack(token.scopes)) return null;
+    return this.gmail.thread(token, threadId);
   }
 }
 

@@ -87,7 +87,7 @@ model EmailTemplate {
   @@map("email_templates")
 }
 
-/// Application emails Gmail accepted (the body is not stored)
+/// Application emails Gmail accepted (the body is not stored), with delivery, open and reply tracking
 model SentEmail {
   id             String   @id @default(uuid()) @db.Uuid
   userId         String   @map("user_id") @db.Uuid
@@ -98,6 +98,18 @@ model SentEmail {
   gmailMessageId String   @map("gmail_message_id") @db.VarChar(128)
   gmailThreadId  String?  @map("gmail_thread_id") @db.VarChar(128)
   sentAt         DateTime @map("sent_at") @db.Timestamptz(6)
+  /// SENT (just accepted), DELIVERED (no bounce came back) or BOUNCED
+  deliveryStatus String    @default("SENT") @map("delivery_status") @db.VarChar(16)
+  bouncedAt      DateTime? @map("bounced_at") @db.Timestamptz(6)
+  /// Random id in the open-tracking pixel URL (null when tracking was off)
+  trackingToken  String?   @unique(map: "sent_emails_tracking_token_key") @map("tracking_token") @db.VarChar(64)
+  openCount      Int       @default(0) @map("open_count")
+  firstOpenedAt  DateTime? @map("first_opened_at") @db.Timestamptz(6)
+  lastOpenedAt   DateTime? @map("last_opened_at") @db.Timestamptz(6)
+  replyCount     Int       @default(0) @map("reply_count")
+  repliedAt      DateTime? @map("replied_at") @db.Timestamptz(6)
+  /// Last time the Gmail thread was read for bounces and replies
+  checkedAt      DateTime? @map("checked_at") @db.Timestamptz(6)
 
   user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   job      Job?           @relation(fields: [jobId], references: [id], onDelete: SetNull)

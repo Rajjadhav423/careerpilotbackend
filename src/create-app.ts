@@ -1,13 +1,14 @@
 import cors from "cors";
 import express, { Router, type Express } from "express";
 
-import { ApplicationEmailService, applicationEmailsRouter } from "./applications/application-emails.js";
+import { ApplicationEmailService, applicationEmailsRouter, sentEmailsRouter } from "./applications/application-emails.js";
+import { trackingPixelRouter } from "./applications/email-tracking.js";
 import { currentUser, requireUser, type TokenVerifier } from "./auth/clerk.js";
 import { clerkWebhookRouter } from "./auth/webhook.js";
 import type { Config } from "./config.js";
 import type { Db } from "./db/prisma.js";
-import { DEFAULT_BOARDS, defaultFetchers, parseBoard, type BoardFetcher, type BoardProvider } from "./discovery/boards.js";
-import { DiscoveryService, discoveryRouter } from "./discovery/discovery.js";
+import { JobSearch, jobSearchRouter } from "./discovery/job-search.js";
+import { defaultJobSources, type JobSources } from "./discovery/sources.js";
 import { docsRouter } from "./docengine/docs-router.js";
 import { DocEngine } from "./docengine/engine.js";
 import type { PdfRenderer } from "./docengine/pdf.js";
@@ -25,8 +26,8 @@ import { fillFields, UserFieldService, userFieldsRouter } from "./users/fields.j
 import { toMeResponse, UserService, type User } from "./users/users.js";
 
 /*
- * The HTTP API under /api/v1. Every route needs a valid Clerk session token except GET /health and the Clerk webhook
- * (which proves itself with a Svix signature). Stateless: no sessions or cookies, so CSRF protection isn't needed.
+ * The HTTP API under /api/v1. Every route needs a valid Clerk session token except GET /health, the Clerk webhook
+ * (which proves itself with a Svix signature) and the email open-tracking pixel (/t). Stateless: no sessions or cookies, so CSRF protection isn't needed.
  * Outside services (Clerk, Google, job boards, Chromium) come in as dependencies so tests can replace them.
  */
 
@@ -38,7 +39,8 @@ export type AppDependencies = {
   gmailSender: GmailSender;
   driveClient: DriveClient;
   pdf: PdfRenderer;
-  boardFetchers?: Partial<Record<BoardProvider, BoardFetcher>>;
+  /** Find jobs sources; tests pass fakes so nothing goes to the internet */
+  jobSources?: JobSources;
   /** Saved details ({{github}} …); defaults to the user_fields table (tests can skip the database) */
   userFields?: UserFieldService;
   /** Looks up the signed-in user; defaults to the users table (tests can skip the database) */
@@ -57,8 +59,7 @@ export function createApp(deps: AppDependencies): App {
   const userFields = deps.userFields ?? new UserFieldService(db);
   const templates = new TemplateService(db, userFields);
   const gmail = new GmailService(deps.googleAccounts, deps.gmailSender);
-  const boards = (config.discoveryBoards.length > 0 ? config.discoveryBoards : DEFAULT_BOARDS).map(parseBoard);
-  const discovery = new DiscoveryService(boards, deps.boardFetchers ?? defaultFetchers(), undefined, now);
+  const jobSearch = new JobSearch(deps.jobSources ?? defaultJobSources, now);
   const engine = new DocEngine(new DocPresets(), deps.pdf);
   const drive = new DriveService(db, deps.googleAccounts, deps.driveClient);
   const resumeDocuments = new ResumeDocuments(engine);
@@ -78,7 +79,9 @@ export function createApp(deps: AppDependencies): App {
     if (file.mimeType !== "application/pdf") throw new ApiError(422, "ATTACHMENT_NOT_PDF", "Only PDF resumes can be attached.");
     return { fileName: file.name, content: file.content };
   };
-  const applicationEmails = new ApplicationEmailService(db, jobs, templates, gmail, now, resumePdf, drivePdf);
+  const applicationEmails = new ApplicationEmailService(
+    db, jobs, templates, gmail, now, resumePdf, drivePdf, config.trackingBaseUrl,
+  );
 
   const app = express();
   app.disable("x-powered-by");
@@ -106,6 +109,9 @@ export function createApp(deps: AppDependencies): App {
   // Raw body: the Svix signature covers the exact bytes Clerk sent
   api.use("/webhooks/clerk", clerkWebhookRouter(config.clerk.webhookSecret, users));
 
+  // Open-tracking pixel: loaded by the recipient's mail client, so no sign-in
+  api.use("/t", trackingPixelRouter(db, now));
+
   // Everything below: JSON bodies up to MAX_REQUEST_BYTES (413 REQUEST_TOO_LARGE above), signed-in users only
   api.use(express.json({ limit: config.maxRequestBytes, type: ["application/json", "application/*+json"] }));
   api.use(requireUser(deps.verifyToken, deps.userResolver ?? users));
@@ -115,10 +121,11 @@ export function createApp(deps: AppDependencies): App {
   });
   api.use("/me/fields", userFieldsRouter(userFields));
   api.use("/jobs/:jobId/emails", applicationEmailsRouter(applicationEmails));
+  api.use("/emails", sentEmailsRouter(applicationEmails));
   api.use("/jobs", jobsRouter(jobs));
   api.use("/email-templates", templatesRouter(templates));
   api.use("/gmail", gmailRouter(gmail));
-  api.use("/discover", discoveryRouter(discovery));
+  api.use("/discover", jobSearchRouter(jobSearch, now));
   api.use("/docs", docsRouter(engine, userFields));
   api.use("/resumes", resumesRouter(resumes, resumeDocuments, drive, userFields));
   api.use("/drive", driveRouter(drive));

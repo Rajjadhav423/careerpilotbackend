@@ -1,5 +1,7 @@
-import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { lookup as dnsLookup, type LookupAddress } from "node:dns";
+import http, { type IncomingMessage } from "node:http";
+import https from "node:https";
+import { BlockList, isIP, type LookupFunction } from "node:net";
 
 import { ApiError } from "../http/errors.js";
 
@@ -107,41 +109,100 @@ export function oneLine(value: string): string {
 
 // ---- fetching ----
 
+const REQUEST_HEADERS = {
+  // LinkedIn serves pre-rendered HTML to crawlers
+  "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+const TIMEOUT_MS = 10_000;
+
+const notAllowed = () => new ApiError(400, "URL_NOT_ALLOWED", "Only public web links can be imported.");
+const unreachable = () => new ApiError(502, "URL_UNREACHABLE", "Could not reach the link.");
+
 async function fetchPublicPage(raw: string): Promise<string> {
   let url = parseHttpUrl(raw);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertPublicHost(url.hostname);
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        redirect: "manual",
-        signal: AbortSignal.timeout(10_000),
-        headers: {
-          // LinkedIn serves pre-rendered HTML to crawlers
-          "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "TimeoutError") {
-        throw new ApiError(504, "URL_TIMEOUT", "The page took too long to respond. Try again.");
-      }
-      throw new ApiError(502, "URL_UNREACHABLE", "Could not reach the link.");
-    }
-    if (response.status >= 300 && response.status < 400 && response.headers.get("location")) {
-      url = parseHttpUrl(new URL(response.headers.get("location")!, url).toString());
+    // IP literals skip DNS (and so publicOnlyLookup); host names are checked when the connection is made
+    const literal = url.hostname.replace(/^\[|\]$/g, "");
+    if (isIP(literal) && isPrivateAddress(literal)) throw notAllowed();
+    const response = await getPage(url);
+    if (response.status >= 300 && response.status < 400 && response.location) {
+      url = parseHttpUrl(new URL(response.location, url).toString());
       continue;
     }
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       throw new ApiError(422, "URL_FAILED",
         `The page responded with status ${response.status}. The site may require login for this post.`);
     }
-    const length = Number(response.headers.get("content-length") ?? 0);
-    if (length > MAX_HTML_BYTES) throw new ApiError(422, "PAGE_TOO_LARGE", "The page is too large to read.");
-    return (await response.text()).slice(0, MAX_HTML_BYTES);
+    return response.body;
   }
   throw new ApiError(422, "TOO_MANY_REDIRECTS", "The link redirects too many times.");
+}
+
+/** Marks a connection refused by publicOnlyLookup. */
+class BlockedAddressError extends Error {}
+
+/**
+ * dns.lookup that refuses non-public addresses. Used as the connection's own lookup, so the address checked is the
+ * address connected to: a host name can't resolve to a public address for a check and a private one for the request.
+ */
+const publicOnlyLookup: LookupFunction = (hostname, options, callback) => {
+  dnsLookup(hostname, { ...options, all: true }, (error, addresses: LookupAddress[]) => {
+    if (error) return callback(error, "", 0);
+    if (addresses.length === 0) return callback(new Error("No address"), "", 0);
+    if (addresses.some((entry) => isPrivateAddress(entry.address))) return callback(new BlockedAddressError(), "", 0);
+    if (options.all) return callback(null, addresses);
+    callback(null, addresses[0]!.address, addresses[0]!.family);
+  });
+};
+
+type Page = { status: number; location: string | null; body: string };
+
+/** One GET, no redirects followed; the body is read up to MAX_HTML_BYTES. */
+function getPage(url: URL): Promise<Page> {
+  return new Promise((resolve, reject) => {
+    const client = url.protocol === "https:" ? https : http;
+    const request = client.get(url, { headers: REQUEST_HEADERS, lookup: publicOnlyLookup, agent: false },
+      (response: IncomingMessage) => {
+        const status = response.statusCode ?? 0;
+        const location = response.headers.location ?? null;
+        if (status < 200 || status >= 300) {
+          response.resume();
+          return finish(() => resolve({ status, location, body: "" }));
+        }
+        if (Number(response.headers["content-length"] ?? 0) > MAX_HTML_BYTES) {
+          response.destroy();
+          return finish(() => reject(new ApiError(422, "PAGE_TOO_LARGE", "The page is too large to read.")));
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        const done = () => finish(() => resolve({ status, location, body: Buffer.concat(chunks).toString("utf8") }));
+        response.on("data", (chunk: Buffer) => {
+          const room = MAX_HTML_BYTES - size;
+          chunks.push(chunk.length > room ? chunk.subarray(0, room) : chunk);
+          size += chunk.length;
+          if (size >= MAX_HTML_BYTES) {
+            response.destroy();
+            done();
+          }
+        });
+        response.on("end", done);
+        response.on("error", () => finish(() => reject(unreachable())));
+      });
+    const timer = setTimeout(() => {
+      request.destroy();
+      finish(() => reject(new ApiError(504, "URL_TIMEOUT", "The page took too long to respond. Try again.")));
+    }, TIMEOUT_MS);
+    let settled = false;
+    function finish(settle: () => void) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      settle();
+    }
+    request.on("error", (error) => finish(() => reject(error instanceof BlockedAddressError ? notAllowed() : unreachable())));
+  });
 }
 
 function parseHttpUrl(raw: string): URL {
@@ -158,24 +219,63 @@ function parseHttpUrl(raw: string): URL {
   return url;
 }
 
-async function assertPublicHost(hostname: string) {
-  const host = hostname.replace(/^\[|\]$/g, "");
-  const addresses = isIP(host) ? [host] : (await lookup(host, { all: true }).catch(() => [])).map((a) => a.address);
-  if (addresses.length === 0) throw new ApiError(502, "URL_UNREACHABLE", "Could not reach the link.");
-  if (addresses.some(isPrivateAddress)) throw new ApiError(400, "URL_NOT_ALLOWED", "Only public web links can be imported.");
+/** Loopback, private, link-local (incl. cloud metadata), CGNAT, documentation, multicast and reserved ranges. */
+const BLOCKED = new BlockList();
+for (const [network, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8],
+  ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16],
+  ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 3]] as const) {
+  BLOCKED.addSubnet(network, prefix, "ipv4");
+}
+// Unspecified/loopback, discard-only, Teredo, documentation, unique local, link-local, old site-local, multicast
+for (const [network, prefix] of [["::", 127], ["100::", 64], ["2001::", 32], ["2001:db8::", 32], ["fc00::", 7],
+  ["fe80::", 10], ["fec0::", 10], ["ff00::", 8]] as const) {
+  BLOCKED.addSubnet(network, prefix, "ipv6");
 }
 
-/** Loopback, private, link-local (incl. cloud metadata), CGNAT, multicast and reserved ranges. */
+/**
+ * True for any address that isn't public, including IPv4 addresses written inside IPv6 (::ffff:7f00:1, ::127.0.0.1,
+ * 64:ff9b::…, 2002:…), which reach the same IPv4 host. Anything unparseable counts as private.
+ */
 export function isPrivateAddress(address: string): boolean {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
-  if (mapped) return isPrivateAddress(mapped[1]);
-  if (isIP(address) === 4) {
-    const [a, b] = address.split(".").map(Number);
-    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || (a === 198 && (b === 18 || b === 19));
+  if (isIP(address) === 4) return BLOCKED.check(address, "ipv4");
+  const words = ipv6Words(address);
+  if (!words) return true;
+  const ipv4 = embeddedIpv4(words);
+  if (ipv4 !== null) return BLOCKED.check(ipv4, "ipv4");
+  return BLOCKED.check(words.map((word) => word.toString(16)).join(":"), "ipv6");
+}
+
+/** The eight 16-bit groups of an IPv6 address (a dotted IPv4 tail and a zone id allowed), or null. */
+function ipv6Words(address: string): number[] | null {
+  let text = address.toLowerCase().split("%")[0]!;
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(1).map(Number) as [number, number, number, number];
+    if ([a, b, c, d].some((part) => part > 255)) return null;
+    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
-  const v6 = address.toLowerCase();
-  return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("ff");
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const groups = (half: string) => (half ? half.split(":") : []);
+  const head = groups(halves[0]!);
+  const tail = halves.length === 2 ? groups(halves[1]!) : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const all = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (!all.every((group) => /^[0-9a-f]{1,4}$/.test(group))) return null;
+  return all.map((group) => parseInt(group, 16));
+}
+
+/** The IPv4 address an IPv6 address stands for (mapped, compatible, NAT64, 6to4), or null. */
+function embeddedIpv4(words: number[]): string | null {
+  const ipv4 = (high: number, low: number) => `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  const zero = (from: number, to: number) => words.slice(from, to).every((word) => word === 0);
+  if (zero(0, 5) && words[5] === 0xffff) return ipv4(words[6]!, words[7]!); // ::ffff:a.b.c.d
+  if (zero(0, 4) && words[4] === 0xffff && words[5] === 0) return ipv4(words[6]!, words[7]!); // ::ffff:0:a.b.c.d
+  if (zero(0, 6)) return ipv4(words[6]!, words[7]!); // ::a.b.c.d (also :: and ::1, both blocked as IPv4)
+  if (words[0] === 0x64 && words[1] === 0xff9b && zero(2, 6)) return ipv4(words[6]!, words[7]!); // NAT64
+  if (words[0] === 0x2002) return ipv4(words[1]!, words[2]!); // 6to4
+  return null;
 }
 
 // ---- reading the page ----
@@ -267,13 +367,14 @@ async function extractWithAi(text: string, hints: { title: string; company: stri
   if (!key) return null;
   const input = [hints.title && `Page title: ${hints.title}`, hints.company && `Site/company hint: ${hints.company}`,
     "Page text:", text.slice(0, 14_000)].filter(Boolean).join("\n");
+  const model = process.env.GROQ_MODEL?.trim() || "openai/gpt-oss-120b";
   let parsed: Record<string, unknown>;
   try {
     const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: process.env.GROQ_MODEL?.trim() || "llama-3.3-70b-versatile",
+        model,
         temperature: 0,
         max_tokens: 2000,
         response_format: { type: "json_object" },
@@ -282,8 +383,9 @@ async function extractWithAi(text: string, hints: { title: string; company: stri
       signal: AbortSignal.timeout(25_000),
     });
     if (!response.ok) {
-      // Status only: the page text could contain personal data
-      console.warn(`Groq extraction failed with status ${response.status}`);
+      // Status, model and Groq's error code only: the page text could contain personal data
+      const code = ((await response.json().catch(() => null)) as { error?: { code?: string } } | null)?.error?.code;
+      console.warn(`Groq extraction failed with status ${response.status} (model ${model}${code ? `, ${code}` : ""})`);
       return null;
     }
     const body = (await response.json()) as { choices?: { message?: { content?: string } }[] };
