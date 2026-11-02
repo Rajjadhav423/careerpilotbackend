@@ -200,6 +200,32 @@ describe.skipIf(!TEST_DATABASE_URL)("API with PostgreSQL", () => {
     });
   });
 
+  describe("own subject and body", () => {
+    it("uses the user's subject and body instead of the template's, filling placeholders", async () => {
+      const job = await createJob({ title: "Java Developer" });
+      await api().post("/api/v1/email-templates").set(auth()).send({
+        name: "Default", subject: "{{job_title}} at {{company_name}}", body: "Template body", isDefault: true,
+      });
+      const own = await api().post(`/api/v1/jobs/${job.body.id}/emails/compose`).set(auth())
+        .send({ subject: "Application for {{job_title}} – Me", body: "Hi {{company_name}} team,\n\nBest regards,\nMe" });
+      expect(own.body).toMatchObject({
+        subject: "Application for Java Developer – Me", body: "Hi Acme team,\n\nBest regards,\nMe", templateName: "Default",
+      });
+      // Only the body overridden: the template's subject stays
+      const bodyOnly = await api().post(`/api/v1/jobs/${job.body.id}/emails/compose`).set(auth()).send({ body: "Just this" });
+      expect(bodyOnly.body).toMatchObject({ subject: "Java Developer at Acme", body: "Just this" });
+      // A subject must be one line
+      const twoLines = await api().post(`/api/v1/jobs/${job.body.id}/emails/compose`).set(auth()).send({ subject: "a\nb" });
+      expect(twoLines.status).toBe(400);
+    });
+
+    it("works without any template", async () => {
+      const job = await createJob();
+      const res = await api().post(`/api/v1/jobs/${job.body.id}/emails/compose`).set(auth()).send({ subject: "Hello", body: "Body" });
+      expect(res.body).toMatchObject({ templateId: null, subject: "Hello", body: "Body" });
+    });
+  });
+
   describe("scheduled emails", () => {
     it("saves a Gmail draft, sends it when due and records the application", async () => {
       let clock = new Date("2026-11-02T10:00:00Z");

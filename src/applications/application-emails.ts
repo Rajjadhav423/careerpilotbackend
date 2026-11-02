@@ -38,7 +38,14 @@ const notBlank = (max: number) =>
 export const composeSchema = z.object({
   templateId: uuid.nullish(),
   timeZone: z.string().max(64, "size must be between 0 and 64").nullish(),
+  /** Your own subject instead of the template's; {{placeholders}} in it are filled like a template's */
+  subject: z.string().max(255, "size must be between 0 and 255").regex(/^[^\r\n]*$/, "must be a single line").nullish(),
+  /** Your own body instead of the template's; {{placeholders}} in it are filled like a template's */
+  body: z.string().max(20_000, "size must be between 0 and 20000").nullish(),
 });
+
+/** Text that replaces the template's when composing (blank or absent keeps the template's). */
+export type ComposeOverrides = { subject?: string | null; body?: string | null };
 
 /** confirmed must be true: the user reviewed the email and explicitly chose to send it. */
 export const sendSchema = z.object({
@@ -182,13 +189,21 @@ export class ApplicationEmailService {
     private readonly trackingBaseUrl: string | null = null,
   ) {}
 
-  async compose(user: User, jobId: string, templateId: string | null | undefined, timeZone: string | null | undefined)
-    : Promise<ComposeResponse> {
+  /**
+   * The template filled in for this job. overrides: the user's own subject and/or body replace the template's
+   * (placeholders in them are filled the same way); without a template, only the overrides are used.
+   */
+  async compose(
+    user: User, jobId: string, templateId: string | null | undefined, timeZone: string | null | undefined,
+    overrides: ComposeOverrides = {},
+  ): Promise<ComposeResponse> {
     const job = await this.jobs.get(user.id, jobId);
     const template = templateId
       ? await this.templates.get(user.id, templateId)
       : await this.templates.findDefault(user.id);
-    if (!template) {
+    const ownSubject = overrides.subject?.trim() ? overrides.subject : null;
+    const ownBody = overrides.body?.trim() ? overrides.body : null;
+    if (!template && ownSubject === null && ownBody === null) {
       return { templateId: null, templateName: null, subject: "", body: "", missingFields: [], unknownPlaceholders: [] };
     }
     // Saved details (Settings) fill anything the account and job don't have, e.g. {{resume_url}} or {{github}}
@@ -196,12 +211,12 @@ export class ApplicationEmailService {
     const details = await this.templates.detailValues(user.id);
     const values: Record<string, string | null> = { ...details };
     for (const [key, value] of Object.entries(builtIn)) if (value != null && value.trim() !== "") values[key] = value;
-    const subject = resolve(template.subject, values);
-    const text = resolve(template.body, values);
+    const subject = resolve(ownSubject ?? template?.subject ?? "", values);
+    const text = resolve(ownBody ?? template?.body ?? "", values);
     const missing = new Set([...subject.missing, ...text.missing]);
     return {
-      templateId: template.id,
-      templateName: template.name,
+      templateId: template?.id ?? null,
+      templateName: template?.name ?? null,
       subject: subject.text,
       body: text.text,
       missingFields: MERGE_FIELDS.filter((field) => missing.has(field.key))
@@ -363,7 +378,8 @@ export function applicationEmailsRouter(service: ApplicationEmailService): Route
   router.post("/compose", async (req, res) => {
     const jobId = uuidParam(req, "jobId", jobNotFound());
     const request = body(req, composeSchema);
-    res.json(await service.compose(currentUser(res), jobId, request.templateId, request.timeZone));
+    res.json(await service.compose(currentUser(res), jobId, request.templateId, request.timeZone,
+      { subject: request.subject, body: request.body }));
   });
 
   /** Sends the reviewed email from the user's Gmail. Requires "confirmed": true. */
