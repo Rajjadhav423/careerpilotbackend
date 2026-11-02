@@ -21,8 +21,8 @@ async function token(overrides: { sub?: string; aud?: string; iss?: string; life
 describe("service tokens", () => {
   const verify = serviceTokenVerifier(SECRET);
 
-  it("accepts a short-lived token for this API naming a Clerk user, with no profile", async () => {
-    await expect(verify(await token())).resolves.toEqual({ subject: "user_123", profile: {} });
+  it("accepts a short-lived token for this API naming a Clerk user, with no profile, marked as a service", async () => {
+    await expect(verify(await token())).resolves.toEqual({ subject: "user_123", profile: {}, service: true });
   });
 
   it("refuses the wrong secret, audience, issuer, a long lifetime and a non-Clerk subject", async () => {

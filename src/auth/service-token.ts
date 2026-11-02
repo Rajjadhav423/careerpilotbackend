@@ -27,7 +27,7 @@ export function serviceTokenVerifier(secret: string): TokenVerifier {
     if (payload.exp! - payload.iat! > MAX_LIFETIME_SECONDS) throw new Error("The service token lives too long");
     if (!payload.sub!.startsWith("user_")) throw new Error("The service token doesn't name a Clerk user");
     // No profile: the user's stored name and email stay as they are
-    return { subject: payload.sub!, profile: {} };
+    return { subject: payload.sub!, profile: {}, service: true };
   };
 }
 

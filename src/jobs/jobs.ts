@@ -2,7 +2,7 @@ import type { Job as JobModel } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 
-import { currentUser } from "../auth/clerk.js";
+import { currentUser, requireSignedInUser } from "../auth/clerk.js";
 import type { Db, Tx } from "../db/prisma.js";
 import { ApiError } from "../http/errors.js";
 import { body, flag, httpUrlOrEmpty, optionalText, query, requiredText, uuidParam } from "../http/validate.js";
@@ -71,7 +71,8 @@ export const updateJobSchema = z.object({
   title: z.string().min(1, "size must be between 1 and 200").max(200, "size must be between 1 and 200").nullish(),
   company: z.string().min(1, "size must be between 1 and 200").max(200, "size must be between 1 and 200").nullish(),
   location: optionalText(200),
-  workMode: workMode.nullish(),
+  /** "" clears it (not specified); null or absent leaves it unchanged */
+  workMode: z.enum([...WORK_MODES, ""], { message: `must be one of ${WORK_MODES.join(", ")}` }).nullish(),
   jobUrl: httpUrlOrEmpty(2048),
   description: optionalText(20_000),
   notes: optionalText(10_000),
@@ -88,6 +89,10 @@ const notFound = () => new ApiError(404, "JOB_NOT_FOUND", "Job not found.");
 
 export class JobService {
   constructor(private readonly db: Db) {}
+
+  async delete(userId: string, jobId: string): Promise<void> {
+    await deleteJob(this.db, userId, jobId);
+  }
 
   async list(userId: string, filter: { status?: JobStatus; archived: boolean }): Promise<Job[]> {
     const jobs = await this.db.job.findMany({
@@ -132,7 +137,7 @@ export class JobService {
     if (request.title != null) data.title = requireText(request.title, "title");
     if (request.company != null) data.company = requireText(request.company, "company");
     if (request.location != null) data.location = blankToNull(request.location);
-    if (request.workMode != null) data.workMode = request.workMode;
+    if (request.workMode != null) data.workMode = request.workMode || null;
     if (request.jobUrl != null) data.jobUrl = blankToNull(request.jobUrl);
     if (request.description != null) data.description = blankToNull(request.description);
     if (request.notes != null) data.notes = blankToNull(request.notes);
@@ -154,6 +159,20 @@ export class JobService {
       },
     }));
   }
+}
+
+/**
+ * Deletes a job for good. Its sent emails keep their history (no longer linked to a job). Refused while an email for
+ * it is still scheduled, so no Gmail draft is left that would never be sent: cancel those first.
+ */
+export async function deleteJob(db: Db, userId: string, jobId: string): Promise<void> {
+  const job = await findJob(db, userId, jobId);
+  const waiting = await db.scheduledEmail.count({ where: { jobId: job.id, status: { in: ["SCHEDULED", "SENDING"] } } });
+  if (waiting > 0) {
+    throw new ApiError(409, "JOB_HAS_SCHEDULED_EMAILS",
+      "This job has a scheduled email. Cancel it under Jobs → Emails first, then delete the job.");
+  }
+  await db.job.delete({ where: { id: job.id } });
 }
 
 async function findJob(tx: Tx, userId: string, jobId: string) {
@@ -203,6 +222,13 @@ export function jobsRouter(jobs: JobService): Router {
   router.patch("/:id", async (req, res) => {
     const id = uuidParam(req, "id", notFound());
     res.json(await jobs.update(currentUser(res).id, id, body(req, updateJobSchema)));
+  });
+
+  /** Deletes a job for good. Only from CareerPilot itself: assistants (MCP service tokens) get 403. */
+  router.delete("/:id", async (req, res) => {
+    const user = requireSignedInUser(res);
+    await jobs.delete(user.id, uuidParam(req, "id", notFound()));
+    res.status(204).end();
   });
 
   return router;

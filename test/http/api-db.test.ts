@@ -200,6 +200,43 @@ describe.skipIf(!TEST_DATABASE_URL)("API with PostgreSQL", () => {
     });
   });
 
+  describe("editing a job", () => {
+    it("changes the fields given, clears ones sent empty and leaves the rest", async () => {
+      const job = (await createJob({ location: "Pune", workMode: "HYBRID", jobUrl: "https://jobs.example.com/1", description: "Old", notes: "HR email: a@acme.com" })).body;
+      const res = await api().patch(`/api/v1/jobs/${job.id}`).set(auth())
+        .send({ title: "Java Developer", location: "", workMode: "", description: "New", notes: null });
+      expect(res.body).toMatchObject({
+        title: "Java Developer", company: "Acme", location: null, workMode: null, jobUrl: "https://jobs.example.com/1",
+        description: "New", notes: "HR email: a@acme.com", status: job.status,
+      });
+    });
+  });
+
+  describe("deleting a job", () => {
+    it("deletes it, keeps its sent email history, and refuses while an email is scheduled", async () => {
+      const clock = new Date("2026-11-02T10:00:00Z");
+      t = buildApp(db, { now: () => clock });
+      t.google.token = { value: "google-token", scopes: new Set([...t.google.token!.scopes, GMAIL_COMPOSE_SCOPE]) };
+      const job = (await createJob()).body;
+      const email = { to: "hr@acme.com", subject: "Application", body: "Hello", confirmed: true };
+      await api().post(`/api/v1/jobs/${job.id}/emails`).set(auth()).send(email);
+      const scheduled = (await api().post(`/api/v1/jobs/${job.id}/emails/schedule`).set(auth())
+        .send({ ...email, sendAt: "2026-11-03T09:00:00Z" })).body;
+
+      const blocked = await api().delete(`/api/v1/jobs/${job.id}`).set(auth());
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.code).toBe("JOB_HAS_SCHEDULED_EMAILS");
+      // Someone else's job looks like it doesn't exist
+      expect((await api().delete(`/api/v1/jobs/${job.id}`).set(auth("user_2"))).status).toBe(404);
+
+      await api().delete(`/api/v1/scheduled-emails/${scheduled.id}`).set(auth());
+      expect((await api().delete(`/api/v1/jobs/${job.id}`).set(auth())).status).toBe(204);
+      expect((await api().get(`/api/v1/jobs/${job.id}`).set(auth())).status).toBe(404);
+      // The sent email stays in the history, no longer linked to a job
+      expect((await api().get("/api/v1/emails").set(auth())).body).toMatchObject([{ recipient: "hr@acme.com", job: null }]);
+    });
+  });
+
   describe("own subject and body", () => {
     it("uses the user's subject and body instead of the template's, filling placeholders", async () => {
       const job = await createJob({ title: "Java Developer" });

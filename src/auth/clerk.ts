@@ -10,7 +10,8 @@ import type { ClerkProfile, User, UserService } from "../users/users.js";
  * party. No Clerk secret is needed for this.
  */
 
-export type VerifiedToken = { subject: string; profile: ClerkProfile };
+/** service: a CareerPilot service (the MCP server) acting for the user, not the user's own browser session */
+export type VerifiedToken = { subject: string; profile: ClerkProfile; service?: boolean };
 
 /** Verifies a bearer token; throws when it isn't valid. Replaceable in tests. */
 export type TokenVerifier = (token: string) => Promise<VerifiedToken>;
@@ -66,6 +67,7 @@ export function requireUser(verify: TokenVerifier, users: Pick<UserService, "res
     try {
       res.locals.user = await users.resolve(token.subject, token.profile);
       res.locals.bearerSubject = token.subject;
+      res.locals.viaService = token.service === true;
       next();
     } catch (error) {
       next(error);
@@ -74,6 +76,17 @@ export function requireUser(verify: TokenVerifier, users: Pick<UserService, "res
 }
 
 /** The signed-in user of a request that passed {@link requireUser}. */
+/**
+ * For actions only the user may take in CareerPilot itself, never an assistant through the MCP server (e.g.
+ * deleting a job): 403 for service tokens.
+ */
+export function requireSignedInUser(res: Response): User {
+  if (res.locals.viaService === true) {
+    throw new ApiError(403, "NOT_ALLOWED_FOR_ASSISTANT", "This can only be done in CareerPilot itself, not through an assistant.");
+  }
+  return currentUser(res);
+}
+
 export function currentUser(res: Response): User {
   const user = res.locals.user as User | undefined;
   if (!user) throw UNAUTHORIZED;

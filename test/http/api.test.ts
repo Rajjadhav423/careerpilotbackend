@@ -213,6 +213,24 @@ describe("resume rendering", () => {
   });
 });
 
+describe("deleting jobs", () => {
+  const JOB = "22222222-2222-4222-8222-222222222222";
+
+  it("is refused for assistants (MCP service tokens) before touching the database", async () => {
+    // "service:<clerk id>" acts like an MCP service token for that user
+    const server = buildApp(noDb, {
+      userResolver: memoryUsers,
+      verifyToken: async (token) => token.startsWith("service:")
+        ? { subject: token.slice("service:".length), profile: {}, service: true }
+        : { subject: token.slice("user:".length), profile: {} },
+    }).app;
+    const res = await request(server).delete(`/api/v1/jobs/${JOB}`).set("Authorization", "Bearer service:user_1");
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("NOT_ALLOWED_FOR_ASSISTANT");
+    expect((await request(server).delete(`/api/v1/jobs/${JOB}`)).status).toBe(401);
+  });
+});
+
 describe("scheduled emails without a database", () => {
   const JOB = "22222222-2222-4222-8222-222222222222";
   const run = "/api/v1/internal/scheduled-emails/run";
