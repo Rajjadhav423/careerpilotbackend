@@ -15,6 +15,7 @@ import {
   newTrackingToken, pixelUrl, readThread, RECHECK_AFTER_MS, TRACK_FOR_MS, trackingStatus,
   type DeliveryStatus, type TrackingStatus,
 } from "./email-tracking.js";
+import { followUpsDue, type FollowUp } from "./follow-ups.js";
 
 /*
  * Application emails for one of the user's jobs: compose from a template, then send through the user's Gmail after
@@ -266,6 +267,18 @@ export class ApplicationEmailService {
     });
     const refreshed = await this.refresh(user, rows);
     return refreshed.map((row) => ({ ...toResponse(row), job: row.job }));
+  }
+
+  /** Applied jobs waiting on the user (see follow-ups.ts); their Gmail threads are checked for new replies first. */
+  async followUps(user: User): Promise<FollowUp[]> {
+    const jobs = await this.db.job.findMany({
+      where: { userId: user.id, status: "APPLIED", archived: false },
+      select: { id: true, title: true, company: true, updatedAt: true, sentEmails: { select: TRACKED_FIELDS } },
+    });
+    const refreshed = new Map((await this.refresh(user, jobs.flatMap((job) => job.sentEmails))).map((row) => [row.id, row]));
+    return followUpsDue(jobs.map(({ sentEmails, ...job }) => ({
+      ...job, emails: sentEmails.map((row) => toResponse(refreshed.get(row.id) ?? row)),
+    })), this.now());
   }
 
   /** Tracking for a few of the user's emails only (the rows a page still watches); unknown ids are left out. */

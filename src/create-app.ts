@@ -3,6 +3,7 @@ import express, { Router, type Express } from "express";
 
 import { ApplicationEmailService, applicationEmailsRouter, sentEmailsRouter } from "./applications/application-emails.js";
 import { trackingPixelRouter } from "./applications/email-tracking.js";
+import { followUpsRouter } from "./applications/follow-ups.js";
 import { currentUser, requireUser, type TokenVerifier } from "./auth/clerk.js";
 import { clerkWebhookRouter } from "./auth/webhook.js";
 import type { Config } from "./config.js";
@@ -123,6 +124,7 @@ export function createApp(deps: AppDependencies): App {
   api.use("/me/fields", userFieldsRouter(userFields));
   api.use("/jobs/:jobId/emails", applicationEmailsRouter(applicationEmails));
   api.use("/emails", sentEmailsRouter(applicationEmails));
+  api.use("/follow-ups", followUpsRouter(applicationEmails));
   api.use("/jobs", jobsRouter(jobs));
   api.use("/email-templates", templatesRouter(templates));
   api.use("/gmail", gmailRouter(gmail));
